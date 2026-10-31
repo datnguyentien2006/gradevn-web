@@ -83,6 +83,7 @@
   const TOLERANT_KEY = 'gradevn.scan.tolerant.v1';
   /** p75 × hệ số này thay cho ×0.5 của Dart khi bật chế độ iOS dễ tính. */
   const TOLERANT_THRESHOLD_FACTOR = 0.8;
+  const LIGHT_INK_KEY = 'gradevn.scan.lightInk.v1';
 
   interface LiveTickSummary {
     at: string;
@@ -177,12 +178,18 @@
   let liveTicksPerSec = $state(0);
   let frameInfo = $state.raw<FrameDiagnosticInfo | null>(null);
   let tolerantMode = $state(loadTolerantMode());
+  let lightInk = $state(loadLightInk());
   let diagExporting = $state(false);
   let trackInfo = $state<TrackDescription | null>(null);
 
   let result = $state.raw<GradeSuccessResponse | null>(null);
   let matchedStudent = $derived(
     roster.find((student) => student.id === result?.studentId) ?? null
+  );
+  let allAnswersBlank = $derived(
+    result != null &&
+      result.scan.answers.length > 0 &&
+      result.scan.answers.every((answer) => answer == null)
   );
   let agreement = $state(0);
   let framesGraded = $state(0);
@@ -409,6 +416,37 @@
         ? 'Đã bật chế độ iOS dễ tính — chỉ dùng để so sánh.'
         : 'Đã tắt chế độ iOS dễ tính — quay về ngưỡng APK.'
     );
+  }
+
+  function loadLightInk(): boolean {
+    try {
+      return localStorage.getItem(LIGHT_INK_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function setLightInk(enabled: boolean): void {
+    lightInk = enabled;
+    try {
+      localStorage.setItem(LIGHT_INK_KEY, enabled ? '1' : '0');
+    } catch {
+      // Safari riêng tư có thể chặn localStorage.
+    }
+    showToast(
+      enabled
+        ? 'Đã bật mực nhạt — ngưỡng ô đáp án 20 (APK: 45).'
+        : 'Đã tắt mực nhạt — quay về ngưỡng APK.'
+    );
+  }
+
+  function toggleLightInk(): void {
+    setLightInk(!lightInk);
+  }
+
+  function retryWithLightInk(): void {
+    setLightInk(true);
+    void rescan();
   }
 
   function frameSnapshot(element: HTMLVideoElement): FrameDiagnosticInfo {
@@ -1122,7 +1160,8 @@
           overlayRects,
           frameSize,
           diagnostics: true,
-          thresholdFactor: thresholdFactor()
+          thresholdFactor: thresholdFactor(),
+          lightInk
         });
         if (response) graded.push(response);
       }
@@ -1490,6 +1529,26 @@
       {/if}
     </section>
 
+    {#if allAnswersBlank}
+      <section class="card light-ink-hint">
+        <h3>Không đọc được ô trả lời nào</h3>
+        <p class="muted">
+          {#if result.lightInk}
+            Đã bật mực nhạt nhưng mọi ô vẫn dưới ngưỡng. Kiểm tra ánh sáng,
+            tô đậm hơn, hoặc chụp sát và giữ phiếu phẳng.
+          {:else}
+            Nếu bạn đã tô nhưng mực quá nhạt, bật “Mực nhạt” (ngưỡng 20 thay
+            vì 45 của APK) rồi chụp lại.
+          {/if}
+        </p>
+        {#if !result.lightInk}
+          <button class="btn primary" onclick={retryWithLightInk}>
+            Bật mực nhạt &amp; chụp lại
+          </button>
+        {/if}
+      </section>
+    {/if}
+
     {#if warnings.length > 0}
       <section class="card warnings">
         <h3>Cần lưu ý</h3>
@@ -1520,6 +1579,12 @@
           <dt>Bộ đáp án</dt>
           <dd>{result.usedKeyExamCode != null ? `Mã ${result.usedKeyExamCode}` : '—'}</dd>
         </div>
+        {#if result.lightInk}
+          <div>
+            <dt>Chế độ quét</dt>
+            <dd>Mực nhạt (ô đáp án 20)</dd>
+          </div>
+        {/if}
         {#if isReal}
           <div>
             <dt>Học sinh</dt>
@@ -1700,23 +1765,21 @@
           </svg>
         </button>
       {/if}
-      {#if !isReal}
-        <button
-          class="icon-btn light"
-          onclick={openSettings}
-          aria-label="Cấu hình đề thử"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M4 7h10M18 7h2M4 17h2M10 17h10M16 4v6M8 14v6"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-            />
-          </svg>
-        </button>
-      {/if}
+      <button
+        class="icon-btn light"
+        onclick={openSettings}
+        aria-label="Cài đặt quét"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M4 7h10M18 7h2M4 17h2M10 17h10M16 4v6M8 14v6"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
     </header>
 
     {#if scanError}
@@ -1758,6 +1821,9 @@
         <div class="light-row">
           <span class="status-dot" class:ok={allGreen}></span>
           <span>{statusText}</span>
+          {#if lightInk}
+            <span class="ink-badge">mực nhạt</span>
+          {/if}
         </div>
         <div class="controls">
           <button class="round-btn" onclick={pickFile} aria-label="Chọn ảnh từ thư viện">
@@ -1795,7 +1861,7 @@
       </footer>
     {/if}
 
-    {#if showSettings && !isReal}
+    {#if showSettings}
       <div
         class="sheet-backdrop"
         role="presentation"
@@ -1803,45 +1869,85 @@
           if (event.target === event.currentTarget) closeSettings();
         }}
       >
-        <dialog open class="sheet" aria-label="Cấu hình đề thử">
+        <dialog
+          open
+          class="sheet"
+          aria-label={isReal ? 'Cài đặt quét' : 'Cấu hình đề thử'}
+        >
           <header class="sheet-head">
             <div>
-              <h2>Đề thử</h2>
+              <h2>{isReal ? 'Cài đặt quét' : 'Đề thử'}</h2>
               <p class="muted">
-                Tạm thời cho bước 4 — bước 5 sẽ thay bằng kỳ thi thật.
+                {isReal
+                  ? 'Tuỳ chọn quét và thông tin camera.'
+                  : 'Tạm thời cho bước 4 — bước 5 sẽ thay bằng kỳ thi thật.'}
               </p>
             </div>
             <button class="link-btn" onclick={closeSettings}>Xong</button>
           </header>
 
-          <label class="field">
-            <span>Mã đề</span>
-            <input
-              type="text"
-              inputmode="numeric"
-              maxlength="3"
-              value={settings.examCode}
-              oninput={updateExamCode}
-              placeholder="001"
-            />
-          </label>
+          {#if !isReal}
+            <label class="field">
+              <span>Mã đề</span>
+              <input
+                type="text"
+                inputmode="numeric"
+                maxlength="3"
+                value={settings.examCode}
+                oninput={updateExamCode}
+                placeholder="001"
+              />
+            </label>
 
-          <label class="field">
-            <span>Đáp án (A–D, tối đa 40 câu)</span>
-            <textarea
-              rows="4"
-              value={settings.answers}
-              oninput={updateAnswers}
-              placeholder="BADCBADC…"
-            ></textarea>
-            <small class="muted">
-              {normalizeAnswerSequence(settings.answers).length}/40 câu
-            </small>
-          </label>
+            <label class="field">
+              <span>Đáp án (A–D, tối đa 40 câu)</span>
+              <textarea
+                rows="4"
+                value={settings.answers}
+                oninput={updateAnswers}
+                placeholder="BADCBADC…"
+              ></textarea>
+              <small class="muted">
+                {normalizeAnswerSequence(settings.answers).length}/40 câu
+              </small>
+            </label>
 
-          <div class="sheet-row">
-            <button class="btn ghost small" onclick={useSample}>Dùng đề mẫu</button>
-            <span class="muted small">Đề mẫu khớp fixtures 37/40 → 9.25</span>
+            <div class="sheet-row">
+              <button class="btn ghost small" onclick={useSample}>Dùng đề mẫu</button>
+              <span class="muted small">Đề mẫu khớp fixtures 37/40 → 9.25</span>
+            </div>
+          {/if}
+
+          <div class="option-group">
+            <label class="switch-row">
+              <span>
+                <b>Mực nhạt (thử nghiệm)</b>
+                <small class="muted">
+                  Hạ ngưỡng mực ô đáp án 45 → 20 mức xám. Mặc định tắt, giống
+                  APK; lưới SBD/mã đề vẫn dùng 45.
+                </small>
+              </span>
+              <input
+                type="checkbox"
+                checked={lightInk}
+                onchange={toggleLightInk}
+              />
+            </label>
+
+            <label class="switch-row">
+              <span>
+                <b>Chế độ iOS dễ tính (mốc tương phản thấp)</b>
+                <small class="muted">
+                  Quét mốc ở p75×0.8 thay vì ×0.5 của APK — chỉ để so sánh,
+                  mặc định tắt.
+                </small>
+              </span>
+              <input
+                type="checkbox"
+                checked={tolerantMode}
+                onchange={toggleTolerant}
+              />
+            </label>
           </div>
 
           <div class="track-box">
@@ -2344,6 +2450,17 @@ settings: {JSON.stringify(trackSettings() ?? {})}</pre>
     box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 70%, transparent);
   }
 
+  .ink-badge {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--neon) 16%, transparent);
+    color: var(--neon);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+  }
+
   .controls {
     width: 100%;
     max-width: 420px;
@@ -2529,6 +2646,12 @@ settings: {JSON.stringify(trackSettings() ?? {})}</pre>
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+  }
+
+  .option-group {
+    display: flex;
+    flex-direction: column;
     gap: 10px;
   }
 
@@ -2735,6 +2858,15 @@ settings: {JSON.stringify(trackSettings() ?? {})}</pre>
 
   .warnings h3 {
     color: var(--warn);
+  }
+
+  .light-ink-hint p {
+    line-height: 1.45;
+  }
+
+  .light-ink-hint .btn {
+    width: 100%;
+    margin-top: 12px;
   }
 
   .meta-grid {

@@ -111,5 +111,17 @@ describe('grade worker diagnostics', () => {
     expect(success.diagnostics!.quadSource).toBe('overlayRects');
     expect(success.diagnostics!.pinnedQuad).not.toBeNull();
     expect(success.diagnostics!.pinnedThresholdFactor).toBe(0.8);
+    expect(success.lightInk).toBe(false);
+  });
+
+  it('echoes the light-ink mode used for this grade', () => {
+    const gradeRequest = request();
+    gradeRequest.id = 8;
+    gradeRequest.lightInk = true;
+    onmessage!({ data: gradeRequest } as MessageEvent<GradeRequest>);
+    expect(posted).toHaveLength(2);
+    const success = posted[1] as GradeSuccessResponse;
+    expect(success.type).toBe('grade-result');
+    expect(success.lightInk).toBe(true);
   });
 });

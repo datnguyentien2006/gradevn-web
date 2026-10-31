@@ -30,6 +30,7 @@ export interface GradeParams {
   frameSize: FrameSizeDto | null;
   diagnostics?: boolean;
   thresholdFactor?: number;
+  lightInk?: boolean;
 }
 
 export interface ProbeOptions {
@@ -85,7 +86,8 @@ export class OmrWorkerClient {
       overlayRects: params.overlayRects,
       frameSize: params.frameSize,
       diagnostics: params.diagnostics === true,
-      thresholdFactor: params.thresholdFactor
+      thresholdFactor: params.thresholdFactor,
+      lightInk: params.lightInk === true
     };
     const response = (await this.send(worker, message, [
       message.image.data

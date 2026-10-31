@@ -18,7 +18,7 @@ Bản TS đọc PNG bằng `sharp`, chạy đúng các tầng đã port và so t
 | `standard40.png` | `000413` | `001` | 40 câu, trống câu 6 và 18 | 9.25 | 37 đúng | Khớp tuyệt đối |
 | `noisy40.png` | `000042` | `007` | 40 câu, không trống | 9.75 | 39 đúng | Khớp tuyệt đối |
 
-Các test liên quan (`npm test`, tổng 81 test / 12 file):
+Các test liên quan (`npm test`, tổng 84 test / 13 file):
 
 - `tests/core/fixturePipeline.test.ts` — SBD, mã đề, toàn bộ dãy đáp án, `score`,
   `correctCount`, `partScores`; kiểm tra thêm kênh 0 cho cùng kết quả với luma.
@@ -35,8 +35,12 @@ Các test liên quan (`npm test`, tổng 81 test / 12 file):
   chỉ ngưỡng 0.5 tái hiện detector bắt vật tối ngoài giấy; mặc định quét lại
   p75×0.8 cho quad khớp 4 mốc; mốc đậm giữ 0.5; `resolveOverlayRects` chỉ trả
   quad ở 0.8 khi bật dự phòng.
-- `tests/workers/gradeDiagnostics.test.ts` — 1 test worker trả
-  `pinnedThresholdFactor` và quad ghim qua `GradeSuccessResponse`.
+- `tests/core/lightInk.test.ts` — 2 test chế độ mực nhạt: mặc định vẫn 45,
+  mực tương phản 40 bị đọc trống ở ngưỡng APK nhưng đọc được ở ngưỡng 20;
+  lưới mã đề vẫn dùng 45 nên ô mực nhạt không sinh chữ số.
+- `tests/workers/gradeDiagnostics.test.ts` — 2 test worker trả
+  `pinnedThresholdFactor`, quad ghim và cờ `lightInk` qua
+  `GradeSuccessResponse`.
 - `tests/camera/vote.test.ts` — 5 test bỏ phiếu đa khung.
 - `tests/storage/stats.test.ts`, `tests/storage/xlsx.test.ts` — thống kê và cấu
   trúc workbook.
@@ -111,6 +115,19 @@ Không có sai lệch density nào làm đổi đáp án trên fixture.
     với Flutter, không liên quan tới toạ độ hay thuật toán chấm.
     Đã audit bằng CDP với dữ liệu mẫu ở 390×844 và 375×667: 11 màn hình + 2
     bottom sheet, 0 phần tử < 44×44, 0 tràn ngang, 0 exception JS (Chromium).
+11. **Mực nhạt (thử nghiệm, mặc định tắt).** Sau khi nắn phẳng đúng (4 mốc
+    xanh), bước đo mật độ của APK — nền viền ô trừ **45** mức xám, lõi bỏ 28%
+    rìa, `OmrDecoder` chọn ô ≥ 0.3 — đọc mọi ô là trống nếu mực quá nhạt.
+    Đo trên `web_06.jpg`: nền ô 202–217, mực 164–176 → tương phản 35–45 < 45,
+    toàn bộ 40 ô đáp án có mật độ 0.00 dù 4 mốc đã xanh. APK dùng đúng 45/0.3
+    như web nên cùng dữ liệu sẽ cho cùng kết quả. Web thêm công tắc "Mực
+    nhạt" trong Cài đặt quét: hạ riêng ngưỡng ô A–D xuống 20
+    (`OmrTuning.answerInkDelta`, `null` = APK), lưới SBD/mã đề vẫn 45. Đo lại
+    trên ảnh nắn phẳng của `web_06.jpg`: ngưỡng 20 đọc được 7/10 ô đã tô;
+    3 ô còn lại có mật độ 0.00 ngay cả ở ngưỡng 15 (không đủ dữ liệu để đọc).
+    Khi cả 40 ô đọc ra trống, màn kết quả gợi ý bật mực nhạt rồi chụp lại.
+    Mặc định không đổi; công tắc dùng được ở mọi kỳ thi và có badge "mực
+    nhạt" ở màn quét.
 
 ## 3. Giới hạn kế thừa nguyên từ Flutter (không tự sửa)
 

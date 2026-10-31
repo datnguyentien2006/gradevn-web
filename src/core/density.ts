@@ -10,11 +10,31 @@ export class OmrTuning {
     public readonly inkDelta = 45,
     public readonly insetRatio = 0.28,
     public readonly borderRatio = 0.08,
-    public readonly sampleStep = 1
+    public readonly sampleStep = 1,
+    /**
+     * Ngưỡng mực riêng cho ô đáp án. null = dùng [inkDelta] như Dart.
+     * Chế độ "mực nhạt" (thử nghiệm, mặc định tắt) đặt 20; lưới SBD/mã đề
+     * vẫn dùng [inkDelta] để không đọc nhầm chữ số.
+     */
+    public readonly answerInkDelta: number | null = null
   ) {}
 }
 
 export const DEFAULT_OMR_TUNING = new OmrTuning();
+
+/**
+ * Ngưỡng mực ô đáp án ở chế độ "mực nhạt" (thử nghiệm, mặc định tắt).
+ * APK dùng 45; 20 chỉ áp cho ô A–D, lưới SBD/mã đề vẫn 45.
+ */
+export const LIGHT_INK_ANSWER_DELTA = 20;
+
+export const LIGHT_INK_TUNING = new OmrTuning(
+  DEFAULT_OMR_TUNING.inkDelta,
+  DEFAULT_OMR_TUNING.insetRatio,
+  DEFAULT_OMR_TUNING.borderRatio,
+  DEFAULT_OMR_TUNING.sampleStep,
+  LIGHT_INK_ANSWER_DELTA
+);
 
 export class SheetDensities {
   constructor(
@@ -81,7 +101,10 @@ export function measureGrayPlanar(
   const scaleRect = (r: Rect): Rect =>
     new Rect(r.left * scaleX, r.top * scaleY, r.right * scaleX, r.bottom * scaleY);
 
-  const measureRect = (rect: Rect): number =>
+  const answerInkDelta = tuning.answerInkDelta ?? tuning.inkDelta;
+  const measureAnswerRect = (rect: Rect): number =>
+    cellInkDensity(data, width, height, scaleRect(rect), tuning, answerInkDelta);
+  const measureCodeRect = (rect: Rect): number =>
     cellInkDensity(data, width, height, scaleRect(rect), tuning);
 
   const blocks: DensityBlock[] = layout.answerBlocks.map((block) => {
@@ -89,7 +112,7 @@ export function measureGrayPlanar(
     for (let row = 0; row < block.rows; row++) {
       const line: number[] = [];
       for (let col = 0; col < block.columns; col++) {
-        line.push(measureRect(block.cellRect(row, col)));
+        line.push(measureAnswerRect(block.cellRect(row, col)));
       }
       values.push(line);
     }
@@ -102,7 +125,7 @@ export function measureGrayPlanar(
       const line: number[] = [];
       for (let value = 0; value < rowCenters.length; value++) {
         line.push(
-          measureRect(
+          measureCodeRect(
             Rect.fromCenter(new Offset(slotCenters[slot], rowCenters[value]), cellSize, cellSize)
           )
         );
@@ -132,7 +155,8 @@ function cellInkDensity(
   imageWidth: number,
   imageHeight: number,
   cell: Rect,
-  tuning: OmrTuning
+  tuning: OmrTuning,
+  inkDelta: number = tuning.inkDelta
 ): number {
   const x1 = clamp(Math.floor(cell.left), 0, imageWidth - 1);
   const y1 = clamp(Math.floor(cell.top), 0, imageHeight - 1);
@@ -163,7 +187,7 @@ function cellInkDensity(
   }
   if (count === 0) return 0;
   const background = sum / count;
-  const darkBelow = background - tuning.inkDelta;
+  const darkBelow = background - inkDelta;
 
   const inset = Math.round(Math.min(cw, ch) * tuning.insetRatio);
   const ix1 = x1 + inset;

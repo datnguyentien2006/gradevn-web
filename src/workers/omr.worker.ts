@@ -11,6 +11,7 @@ import {
 } from '../camera/liveMarkerScan';
 import type { BlobScanDiagnostics } from '../core/markerBlobScan';
 import { scanAndGrade } from '../core/scanFlow';
+import { LIGHT_INK_TUNING } from '../core/density';
 import type {
   BlobCandidateDto,
   BlobDiagnosticsDto,
@@ -113,7 +114,8 @@ function handleGrade(request: GradeRequest): void {
         ? new Size(request.frameSize.width, request.frameSize.height)
         : undefined,
       diagnoseAlignment: request.diagnostics === true,
-      thresholdFactor: request.thresholdFactor ?? 0.5
+      thresholdFactor: request.thresholdFactor ?? 0.5,
+      tuning: request.lightInk === true ? LIGHT_INK_TUNING : undefined
     });
 
     if (graded == null) {
@@ -201,6 +203,7 @@ function handleGrade(request: GradeRequest): void {
       graded: graded.graded,
       ungradedReason: graded.ungradedReason,
       multiAnswerCount: graded.multiAnswerCount,
+      lightInk: request.lightInk === true,
       totalMs: now() - started
     };
     scope.postMessage(response, [warped.buffer]);

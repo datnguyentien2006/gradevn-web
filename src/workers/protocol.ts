@@ -60,6 +60,11 @@ export interface GradeRequest {
   diagnostics?: boolean;
   /** Hệ số ngưỡng cho bước quét blob trong 4 ô ghim. */
   thresholdFactor?: number;
+  /**
+   * Chế độ "mực nhạt" (thử nghiệm, mặc định tắt): hạ ngưỡng mực của ô đáp án
+   * từ 45 xuống 20 mức xám. Lưới SBD/mã đề vẫn dùng ngưỡng APK.
+   */
+  lightInk?: boolean;
 }
 
 export type WorkerRequest = ProbeRequest | GradeRequest;
@@ -219,6 +224,8 @@ export interface GradeSuccessResponse {
   graded: boolean;
   ungradedReason: string | null;
   multiAnswerCount: number;
+  /** Chế độ mực nhạt đã dùng cho lần chấm này. */
+  lightInk: boolean;
   totalMs: number;
 }
 
