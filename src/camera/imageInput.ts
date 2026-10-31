@@ -5,8 +5,12 @@
 /** Giới hạn tiền giải mã, khớp `_kPredecodeMaxWidth` của Dart. */
 export const PREDECODE_MAX_WIDTH = 2000;
 
-/** Cạnh ngắn dùng cho vòng quét mốc live (~8 khung/giây). */
-export const PROBE_MAX_WIDTH = 480;
+/**
+ * Bề rộng khung quét mốc live — khớp `_previewTargetWidth = 640` của
+ * scan_screen.dart. Cùng cỡ mẫu với APK để ngưỡng cỡ blob (tính theo px
+ * của ô) hành xử như nhau.
+ */
+export const PROBE_MAX_WIDTH = 640;
 
 export interface DecodedImage {
   data: Uint8ClampedArray;

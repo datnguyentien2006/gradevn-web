@@ -4,16 +4,9 @@
 // Nguồn Dart: lib/data/cv/scan_flow.dart (_scanAndGrade trong isolate),
 // lib/presentation/screens/scan_screen.dart (_analyzeMarkerFrameInIsolate).
 
-import {
-  AlignmentQuad,
-  expandFractionRect,
-  Offset,
-  Rect,
-  Size
-} from '../core/geometry';
-import { locateDarkBlobInRegion } from '../core/markerBlobScan';
+import { AlignmentQuad, Offset, Rect, Size } from '../core/geometry';
+import { scanLiveMarkerBoxes } from '../camera/liveMarkerScan';
 import { scanAndGrade } from '../core/scanFlow';
-import { OmrScanService } from '../core/scanService';
 import type {
   GradeRequest,
   GradeResponse,
@@ -53,49 +46,19 @@ function handleProbe(request: ProbeRequest): void {
     const height = request.image.height;
     const rgba = new Uint8ClampedArray(request.image.data);
     const grayAt = rgbaLuma(rgba, width, height);
-    const frameSize = new Size(request.frameSize.width, request.frameSize.height);
     const rects = request.rects.map(toRect);
 
-    // Quad chuẩn của pipeline: dùng đúng resolveOverlayRects mà lúc chấm
-    // sẽ dùng, để trạng thái "đủ 4 mốc" khớp với khung nắn thật.
-    const service = new OmrScanService();
-    const quad = service.resolveOverlayRects(
-      rgba,
-      4,
-      width,
-      height,
-      rects,
-      frameSize
-    );
-
-    const squares = rects.map((rect) => {
-      const expanded = expandFractionRect(rect, 1.5);
-      const region = new Rect(
-        expanded.left * width,
-        expanded.top * height,
-        expanded.right * width,
-        expanded.bottom * height
-      );
-      const locate = locateDarkBlobInRegion({ width, height, region, grayAt });
-      const ok =
-        locate != null &&
-        rect.contains(
-          new Offset(locate.centroid.dx / width, locate.centroid.dy / height)
-        ) &&
-        locate.fill >= 0.04;
-      return {
-        ok,
-        center: locate ? toPoint(locate.centroid) : null,
-        fill: locate?.fill ?? 0
-      };
-    });
-
+    // Đèn xanh từng ô = đúng phép quét đường chụp (port R8/R9/R11 của
+    // scan_screen.dart), KHÔNG dùng detector toàn trang.
+    const boxes = scanLiveMarkerBoxes({ width, height, grayAt }, rects);
     const response: ProbeResponse = {
       type: 'probe-result',
       id: request.id,
-      quad: quad ? toQuadDto(quad) : null,
-      squares,
-      candidates: squares.flatMap((s) => (s.ok && s.center ? [s.center] : [])),
+      squares: boxes.map((box) => ({
+        ok: box.ok,
+        fill: box.fill,
+        side: box.side
+      })),
       totalMs: now() - started
     };
     scope.postMessage(response);

@@ -6,12 +6,8 @@ import { SheetLayout, type DigitGridGeometry } from '../core/sheetLayout';
 import { SheetTemplate } from '../core/sheetTemplate';
 import { Size } from '../core/geometry';
 import { contestSheetSpec, type Contest } from '../core/types';
-import type { DensityGridsDto, PointDto, QuadDto, RectDto } from '../workers/protocol';
-import {
-  coverMapping,
-  type Area,
-  type GuideGeometry
-} from './overlayGeometry';
+import type { DensityGridsDto, QuadDto, RectDto } from '../workers/protocol';
+import type { Area, GuideGeometry } from './overlayGeometry';
 import type { ThresholdPreview } from './thresholdPreview';
 import type { DecodedImage } from './imageInput';
 
@@ -23,12 +19,13 @@ export interface LiveOverlayState {
   area: Area;
   guide: GuideGeometry;
   lights: boolean[];
-  quad: QuadDto | null;
-  candidates: PointDto[];
-  frame: Area | null;
-  debug: boolean;
 }
 
+/**
+ * 4 ô mục tiêu — y hệt `_buildSquares` của scan_screen.dart:
+ * nền trắng mờ phẳng, góc vuông, không số; ô đọc được mốc → nền đục hơn
+ * + viền xanh đậm. Không vẽ quad/candidate (APK R11 đã bỏ).
+ */
 export function drawLiveOverlay(
   canvas: HTMLCanvasElement,
   state: LiveOverlayState
@@ -43,59 +40,21 @@ export function drawLiveOverlay(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, state.area.width, state.area.height);
 
-  const boxes = state.guide.centers.map((center, index) => ({
-    center,
-    lit: state.lights[index] === true
-  }));
-
-  for (const box of boxes) {
-    const left = box.center.x - state.guide.boxWidth / 2;
-    const top = box.center.y - state.guide.boxHeight / 2;
-    ctx.beginPath();
-    ctx.roundRect(left, top, state.guide.boxWidth, state.guide.boxHeight, 14);
-    if (box.lit) {
-      ctx.fillStyle = 'rgba(61, 220, 151, 0.16)';
-      ctx.fill();
-      ctx.strokeStyle = GREEN;
+  const { boxWidth, boxHeight } = state.guide;
+  state.guide.centers.forEach((center, index) => {
+    const lit = state.lights[index] === true;
+    const left = center.x - boxWidth / 2;
+    const top = center.y - boxHeight / 2;
+    ctx.fillStyle = lit
+      ? 'rgba(255, 255, 255, 0.55)'
+      : 'rgba(255, 255, 255, 0.32)';
+    ctx.fillRect(left, top, boxWidth, boxHeight);
+    if (lit) {
+      ctx.strokeStyle = '#2e7d32';
       ctx.lineWidth = 3;
-    } else {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.78)';
-      ctx.lineWidth = 2.5;
+      ctx.strokeRect(left + 1.5, top + 1.5, boxWidth - 3, boxHeight - 3);
     }
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(box.center.x, box.center.y, 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = box.lit ? GREEN : 'rgba(255, 255, 255, 0.55)';
-    ctx.fill();
-  }
-
-  if (state.quad && state.frame) {
-    const mapping = coverMapping(state.frame, state.area);
-    const corners = [state.quad.tl, state.quad.tr, state.quad.br, state.quad.bl].map(
-      (p) => mapping.toScreen({ x: p.x, y: p.y })
-    );
-    ctx.beginPath();
-    ctx.moveTo(corners[0].x, corners[0].y);
-    for (let i = 1; i < corners.length; i++) {
-      ctx.lineTo(corners[i].x, corners[i].y);
-    }
-    ctx.closePath();
-    ctx.strokeStyle = 'rgba(61, 220, 151, 0.72)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-
-  if (state.debug && state.frame) {
-    const mapping = coverMapping(state.frame, state.area);
-    for (const point of state.candidates) {
-      const screen = mapping.toScreen({ x: point.x, y: point.y });
-      ctx.beginPath();
-      ctx.arc(screen.x, screen.y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = AMBER;
-      ctx.fill();
-    }
-  }
+  });
 }
 
 /** Vẽ khung hình đã chụp (giữ nguyên tỉ lệ) — dùng làm ảnh đóng băng. */

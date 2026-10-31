@@ -39,9 +39,8 @@ export interface ProbeRequest {
   type: 'probe';
   id: number;
   image: ImageBufferDto;
-  /** 4 ô ghim (tỉ lệ khung) — nơi kỳ vọng thấy 4 mốc góc. */
+  /** 4 ô ghim (tỉ lệ khung ảnh) — nơi kỳ vọng thấy 4 mốc góc. */
   rects: RectDto[];
-  frameSize: FrameSizeDto;
 }
 
 export interface GradeRequest {
@@ -59,16 +58,15 @@ export type WorkerRequest = ProbeRequest | GradeRequest;
 
 export interface SquareProbeDto {
   ok: boolean;
-  center: PointDto | null;
   fill: number;
+  /** Cạnh blob tìm được (px khung quét), 0 khi không có. */
+  side: number;
 }
 
 export interface ProbeResponse {
   type: 'probe-result';
   id: number;
-  quad: QuadDto | null;
   squares: SquareProbeDto[];
-  candidates: PointDto[];
   totalMs: number;
 }
 

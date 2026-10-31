@@ -18,7 +18,7 @@ Bản TS đọc PNG bằng `sharp`, chạy đúng các tầng đã port và so t
 | `standard40.png` | `000413` | `001` | 40 câu, trống câu 6 và 18 | 9.25 | 37 đúng | Khớp tuyệt đối |
 | `noisy40.png` | `000042` | `007` | 40 câu, không trống | 9.75 | 39 đúng | Khớp tuyệt đối |
 
-Các test liên quan (`npm test`, tổng 47 test):
+Các test liên quan (`npm test`, tổng 56 test):
 
 - `tests/core/fixturePipeline.test.ts` — SBD, mã đề, toàn bộ dãy đáp án, `score`,
   `correctCount`, `partScores`; kiểm tra thêm kênh 0 cho cùng kết quả với luma.
@@ -28,6 +28,9 @@ Các test liên quan (`npm test`, tổng 47 test):
   detector đầy đủ, bốn ô ghim `overlayRects`) đều ra đúng dãy đáp án fixture.
 - `tests/core/alignment.test.ts` — warp/homography và quad.
 - `tests/camera/overlayGeometry.test.ts` — 11 test cover/letterbox.
+- `tests/camera/liveMarkerScan.test.ts` — 9 test quét mốc từng ô: đủ 4 tâm,
+  lệch khỏi ô gốc, mốc nhỏ/dẹt, ngưỡng tương phản p75×0.5, chuỗi toạ độ
+  màn hình → khung dọc/ngang.
 - `tests/camera/vote.test.ts` — 5 test bỏ phiếu đa khung.
 - `tests/storage/stats.test.ts`, `tests/storage/xlsx.test.ts` — thống kê và cấu
   trúc workbook.
@@ -37,15 +40,25 @@ Không có sai lệch density nào làm đổi đáp án trên fixture.
 
 ## 2. Khác biệt có chủ đích so với Flutter
 
-1. **Bắt khung hình và bỏ phiếu (live camera).** Flutter chấm một ảnh mỗi lần.
-   Web chờ 4 mốc ổn định 3 tick (`STABLE_TICKS = 3`), chụp 3 khung
-   (`CAPTURE_FRAMES = 3`), chấm từng khung rồi chọn chữ ký (SBD + mã đề + đáp án)
-   xuất hiện nhiều nhất; hoà thì ưu tiên khung qua kiểm chứng mốc, sau đó khung
-   sớm nhất (`src/camera/vote.ts`). Đường chọn ảnh/tải ảnh lên chỉ có một khung,
-   nên kết quả là kết quả chấm đơn thuần như Flutter.
-   *Hệ quả:* với phiếu sát ngưỡng, ảnh chụp live có thể khác Android nếu các
-   khung không đồng thuận; UI hiển thị tỉ lệ đồng thuận và số khung đọc được.
-   Phần toán chấm điểm không đổi.
+1. **Quét mốc live và tự chụp.** Web port đúng `rectReads` trong
+   `_analyzeMarkerFrame` của APK: mỗi nhịp 80 ms (`PROBE_INTERVAL_MS = 80`)
+   lấy khung preview thu về rộng 640 px (`PROBE_MAX_WIDTH`), mỗi ô mở rộng
+   1.5× rồi tìm blob tối bằng đúng tham số live của APK — `minFill 0.6`,
+   aspect 0.6..1.65, `minSidePx = max(4, 0.12×cạnh ngắn ô)`,
+   `maxSidePx = 0.95×cạnh ngắn ô`, ngưỡng đen = phân vị 75 của cửa sổ × 0.5
+   kẹp 30..200 (`src/core/markerBlobScan.ts`). Ô chỉ xanh khi tâm blob nằm
+   trong ô gốc; nhịp live không dùng detector toàn trang, giống APK (R11).
+   Cả 4 ô xanh 2 nhịp liên tiếp (`AUTO_CAPTURE_STREAK = 2`) thì tự chụp; sau
+   đó phải có nhịp rời 4/4 mới bật lại (`autoArmed` như APK), tránh vòng
+   chụp lặp. Nút "Tự động" là tuỳ chọn web-only; tắt thì chỉ chụp bằng nút.
+   Vẽ ô cũng theo APK: ô vuông trắng mờ 0.32 (0.55 khi đọc được), viền xanh
+   `#2E7D32` dày 3, không số/không chấm (`src/camera/render.ts`).
+   Khi chụp, web vẫn lấy 3 khung (`CAPTURE_FRAMES = 3`) rồi bỏ phiếu chữ ký
+   (SBD + mã đề + đáp án) xuất hiện nhiều nhất; hoà thì ưu tiên khung qua
+   kiểm chứng mốc, sau đó khung sớm nhất (`src/camera/vote.ts`). Đây vẫn là
+   khác biệt có chủ đích so với APK (một ảnh): chỉ ảnh hưởng phiếu sát ngưỡng
+   khi các khung không đồng thuận, không đổi toán chấm. Đường chọn ảnh/tải
+   lên chỉ có một khung như APK.
 2. **Định hướng khung hình.** Trình duyệt vẽ `video` theo hướng hiển thị. Các
    hàm `resolveOverlayQuad`/`resolveOverlayRects` thử cặp biến đổi identity/180°
    khi trục ảnh và khung cùng hướng, hoặc biến đổi 90° khi khác hướng
@@ -100,14 +113,35 @@ Muốn sửa cần quyết định của chủ dự án vì sẽ làm web khác 
 8. Khoá đoán tốt nhất ngoài lớp không cảnh báo; multi-mark chỉ cảnh báo, vẫn
    chọn ô đậm nhất.
 9. Crop-review không có; quét lỗi chỉ chụp lại.
+10. Ngưỡng tương phản live giống APK nên cùng một giới hạn: ngưỡng đen là
+    phân vị 75 của cửa sổ × 0.5 kẹp 30..200. Đo trên ảnh người dùng gửi
+    (`web_01.jpg`, phiếu hiển thị trên màn hình laptop): mốc xám trung bình
+    133–147, nền trang 185–210 → ngưỡng ~93–105, mốc không xuống dưới ngưỡng
+    nên cả 4 ô báo 0/4 dù mắt thấy mốc nằm trong ô. APK cũng báo 0/4 trên cùng
+    ảnh đó; in giấy đen thật thì qua. Không hạ ngưỡng vì sẽ đổi hành vi so với
+    Android và dễ nhận nhầm bóng/mép bàn thành mốc.
 
 ## 4. Chưa kiểm chứng được trong môi trường này
 
 - Chưa chạy trên iPhone thật (chưa có thiết bị kết nối): độ phân giải camera
   thực, EXIF ảnh thật, HEIC, wake lock, xoay máy, background/foreground.
   Hành vi từ chối quyền camera, ẩn/foreground (stream dừng rồi mở lại) và xoay
-  ngang đã được kiểm tra trong Chromium headless với camera giả 1920×1080@20 fps,
+  ngang đã được kiểm tra trong Chromium headless với camera giả 1920×1080,
   0 exception JS — nhưng chưa phải Safari iOS.
+- Ma trận live camera (Chromium headless, camera giả Y4M 30 fps, ảnh dọc
+  1080×1920 / ngang 1920×1080, mốc đen dựng đúng tâm 4 ô sau cover mapping,
+  điện thoại 428×926 / 926×428):
+  - mốc 70 px (dọc), 120 px (gần), 30 px (xa), 100 px (ngang): cả 4 ô xanh,
+    trạng thái "Đủ 4 mốc — giữ yên"; cảnh dọc 70 px có 20.342 pixel xanh trên
+    overlay.
+  - mốc 190 px (quá gần, vượt `maxSidePx`), 16 px (quá xa, dưới `minSidePx`),
+    lệch ngang 0.67 chiều rộng ô (tâm blob ngoài ô gốc), mốc xám 146 trên nền
+    210 (dưới ngưỡng tương phản): 0/4, không viền xanh — không có xanh giả.
+  - tự chụp (4 mốc 70 px, bật "Tự động"): vào màn kết quả "3/3 khung · đồng
+    thuận 100%", 0 đúng / 0 sai / 40 trống (khung dựng chỉ có mốc); bấm "Chụp
+    phiếu khác" về live "Giữ yên — sẵn sàng chụp", không tự chụp lặp.
+  - tải `standard40.png` qua input file trong trình duyệt: 9.25,
+    37 đúng / 1 sai / 2 trống — khớp fixture.
 - Chưa deploy Vercel thật (không có tài khoản/credentials trong phiên làm việc).
 - Lighthouse và test offline chạy trên Chrome headless với mobile emulation,
   không phải Safari iOS. Service worker và precache đã được kiểm tra offline

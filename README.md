@@ -21,16 +21,17 @@ dự án gốc `C:\Marker-td` được giữ nguyên, không sửa.
 Đã kiểm chứng trong phiên phát triển:
 
 - `npx tsc --noEmit`: sạch. `npm run check`: 0 lỗi, 0 cảnh báo.
-- `npm test`: 8 file, **47 test pass**, gồm hai fixture PNG khớp tuyệt đối với Dart
-  (`standard40`: SBD 000413, mã đề 001, 9.25/10; `noisy40`: 000042, 007, 9.75/10).
+- `npm test`: 9 file, **56 test pass**, gồm hai fixture PNG khớp tuyệt đối với
+  Dart (`standard40`: SBD 000413, mã đề 001, 9.25/10; `noisy40`: 000042, 007,
+  9.75/10) và 9 test quét mốc live port từ APK.
 - E2E trên trình duyệt: tạo key → quét fixture → lưu phiếu → xem kết quả/stats →
   sửa SBD và chấm lại → reload vẫn còn dữ liệu → backup/restore → xuất XLSX.
-- Build production: JS chính **203.49 kB (66.71 kB gzip)**; XLSX tách chunk lazy
-  **417.60 kB**; worker 31.04 kB; CSS **41.76 kB (7.64 kB gzip)**; eruda
-  **494.40 kB**, chỉ tải khi mở `?debug=1`.
-- Lighthouse 11.7.1 (mobile emulation) trên bản preview của build cuối: Performance
-  **99**, Accessibility **100**, Best Practices **100**, PWA **100**; FCP 1.3 s,
-  LCP 1.8 s, TBT 30 ms, CLS 0.061.
+- Build production: JS chính **207.50 kB (67.98 kB gzip)**; XLSX tách chunk lazy
+  **427.62 kB**; worker 31.94 kB; CSS **42.76 kB (7.82 kB gzip)**; eruda
+  **506.26 kB**, chỉ tải khi mở `?debug=1`.
+- Lighthouse 11.7.1 (mobile emulation, đo trên bản preview production trước thay
+  đổi quét mốc live): Performance **99**, Accessibility **100**, Best Practices
+  **100**, PWA **100**; FCP 1.3 s, LCP 1.8 s, TBT 30 ms, CLS 0.061.
 - Offline bằng CDP: service worker active, precache đủ `index.html`, JS/CSS,
   worker, XLSX, icon; điều hướng `#/stats` khi `navigator.onLine === false` vẫn
   render đầy đủ.
@@ -39,6 +40,10 @@ dự án gốc `C:\Marker-td` được giữ nguyên, không sửa.
   camera giả 1920×1080@20 fps → ẩn tab làm track `ended`, quay lại foreground mở
   stream mới; xoay ngang 844×390 không tràn ngang. 0 exception JS ở cả hai kịch
   bản. Đây là kiểm chứng hành vi trong Chromium — chưa thay thế iPhone Safari thật.
+- Quét mốc live bằng camera giả Y4M 1080×1920/1920×1080 dựng mốc đúng layout:
+  4 ô xanh ở cỡ mốc 30–120 px và khung ngang; 0/4 (không xanh giả) khi mốc quá
+  gần/quá xa, lệch khỏi ô hoặc quá nhạt; tự chụp vào kết quả 3/3 khung, không
+  chụp lặp sau khi quét lại. Chi tiết ma trận ở `docs/WEB_PARITY.md` mục 4.
 - Audit vùng chạm bằng CDP trên bản preview, dữ liệu mẫu (2 lớp, 2 kỳ thi, 5
   phiếu): 11 màn hình + 2 bottom sheet ở **390×844** và **375×667** đều
   **0 phần tử < 44×44 px, 0 tràn ngang, 0 exception JS**; riêng màn nhập đáp án
@@ -89,7 +94,7 @@ npm run preview
 ## Kiểm thử
 
 ```bash
-npm test          # 47 test
+npm test          # 56 test
 npm run check     # svelte-check
 npx tsc --noEmit  # type-check
 ```
@@ -102,15 +107,14 @@ Fixture nằm ở `tests/fixtures/generated` (PNG) và `tests/fixtures/expected`
 
 ### 1. Đưa code lên GitHub
 
-`C:\Gradevn-web` hiện chưa phải git repo. Tạo repo mới (private cũng được) rồi:
+`C:\Gradevn-web` đã là git repo (nhánh `main`, remote `origin` trỏ tới
+`github.com/datnguyentien2006/gradevn-web`). Commit thay đổi rồi push; nếu remote
+chưa tồn tại, tạo repo mới trên GitHub trước:
 
 ```bash
 cd /c/Gradevn-web
-git init
 git add .
 git commit -m "GradeVN Web PWA"
-git branch -M main
-git remote add origin https://github.com/<tài-khoản>/gradevn-web.git
 git push -u origin main
 ```
 
@@ -196,8 +200,9 @@ Chi tiết đo được ở [`docs/WEB_PARITY.md`](docs/WEB_PARITY.md). Tóm t�
 
 - Hai fixture PNG cho kết quả trùng tuyệt đối; chưa có ảnh chụp thật từ iPhone
   để đo sai lệch màu/EXIF.
-- Live camera chụp 3 khung sau khi 4 mốc ổn định và bỏ phiếu đa số; Flutter
-  chấm một khung. Đường chọn ảnh là một khung.
+- Quét mốc live port đúng từng ô của APK (80 ms, khung 640 px, cửa sổ 1.5×,
+  cùng ngưỡng); tự chụp khi cả 4 ô xanh 2 nhịp liên tiếp. Web vẫn chụp 3 khung
+  và bỏ phiếu đa số; Flutter chấm một khung. Đường chọn ảnh là một khung.
 - HEIC phụ thuộc khả năng giải mã của Safari; không nhúng decoder WASM.
 - Các giới hạn logic của Flutter (chỉ TN40, không chấm E, OCR stub, `keyId`
   treo sau khi xoá khoá, mã đề mất số 0 đầu khi so khớp...) được giữ nguyên để

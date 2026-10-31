@@ -3,9 +3,8 @@
   import type {
     DensityGridsDto,
     GradeSuccessResponse,
-    PointDto,
-    QuadDto,
-    RectDto
+    RectDto,
+    SquareProbeDto
   } from '../workers/protocol';
   import { omrWorker } from '../workers/omrClient';
   import { OmrDecoder } from '../core/omrDecoder';
@@ -34,7 +33,6 @@
   import {
     guideGeometry,
     overlayRectsForFrame,
-    quadMaxDistance,
     type Area
   } from './overlayGeometry';
   import {
@@ -69,8 +67,8 @@
   const LIVE_CAPTURE_MAX_WIDTH = 1600;
   const FILE_MAX_WIDTH = 2000;
   const CAPTURE_FRAMES = 3;
-  const STABLE_TICKS = 3;
-  const PROBE_INTERVAL_MS = 170;
+  const AUTO_CAPTURE_STREAK = 2;
+  const PROBE_INTERVAL_MS = 80;
 
   let { contestId = null }: { contestId?: number | null } = $props();
 
@@ -104,10 +102,8 @@
   let ready = $derived(loadState === 'practice' || loadState === 'ready');
 
   let lights = $state<boolean[]>([false, false, false, false]);
-  let detectedQuad = $state.raw<QuadDto | null>(null);
-  let candidates = $state.raw<PointDto[]>([]);
-  let frame = $state.raw<Area | null>(null);
-  let steadyCount = $state(0);
+  let probeSquares = $state.raw<SquareProbeDto[]>([]);
+  let greenStreak = $state(0);
   let probeMs = $state(0);
   let probeCount = $state(0);
   let probeError = $state<string | null>(null);
@@ -142,7 +138,6 @@
   let probeTimer: number | null = null;
   let toastTimer: number | null = null;
   let autoArmed = true;
-  let prevQuad: QuadDto | null = null;
   const wakeKeeper = new WakeLockKeeper();
 
   let allGreen = $derived(lights.length === 4 && lights.every(Boolean));
@@ -154,7 +149,7 @@
     if (cameraError) return 'Camera không khả dụng';
     if (!stream) return 'Camera đang tắt';
     if (allGreen) {
-      return steadyCount >= STABLE_TICKS
+      return greenStreak >= AUTO_CAPTURE_STREAK
         ? 'Giữ yên — sẵn sàng chụp'
         : 'Đủ 4 mốc — giữ yên';
     }
@@ -415,10 +410,8 @@
     if (video) video.srcObject = null;
     void wakeKeeper.release();
     lights = [false, false, false, false];
-    steadyCount = 0;
-    detectedQuad = null;
-    candidates = [];
-    prevQuad = null;
+    probeSquares = [];
+    greenStreak = 0;
   }
 
   function scheduleProbe(delayMs = PROBE_INTERVAL_MS): void {
@@ -449,16 +442,14 @@
       };
       const overlay = overlayRectsForFrame(area, frameNow);
       const image = captureVideoFrame(element, PROBE_MAX_WIDTH);
-      frame = frameNow;
-      const response = await omrWorker.probe(image, overlay.rects, frameNow);
+      const response = await omrWorker.probe(image, overlay.rects);
       if (mode !== 'live' || !stream) return;
       lights = response.squares.map((square) => square.ok);
-      detectedQuad = response.quad;
-      candidates = response.candidates;
+      probeSquares = response.squares;
       probeMs = performance.now() - startedAt;
       probeCount += 1;
       probeError = null;
-      updateSteady(frameNow);
+      applyGreenLights();
     } catch (error) {
       probeError = messageOf(error);
     } finally {
@@ -467,24 +458,17 @@
     }
   }
 
-  function updateSteady(frameNow: Area): void {
+  /** Tự chụp y hệt APK: cả 4 ô xanh 2 nhịp liên tiếp (~160 ms ở 80 ms/nhịp). */
+  function applyGreenLights(): void {
     const green = lights.length === 4 && lights.every(Boolean);
-    const tolerance = Math.max(6, frameNow.width * 0.02);
-    let stable = false;
-    if (green && detectedQuad) {
-      if (prevQuad && quadMaxDistance(prevQuad, detectedQuad) <= tolerance) {
-        steadyCount = Math.min(steadyCount + 1, 12);
-      } else {
-        steadyCount = 1;
-      }
-      stable = steadyCount >= STABLE_TICKS;
-    } else {
-      steadyCount = 0;
+    if (!green) {
+      greenStreak = 0;
       autoArmed = true;
+      return;
     }
-    prevQuad = detectedQuad;
+    if (greenStreak < AUTO_CAPTURE_STREAK) greenStreak += 1;
     if (
-      stable &&
+      greenStreak >= AUTO_CAPTURE_STREAK &&
       ready &&
       settings.autoCapture &&
       autoArmed &&
@@ -515,8 +499,9 @@
     busy = true;
     mode = 'grading';
     autoArmed = false;
-    steadyCount = 0;
+    greenStreak = 0;
     lights = [false, false, false, false];
+    probeSquares = [];
     scanError = null;
     statusOverride = 'Đang chụp…';
     result = null;
@@ -775,15 +760,7 @@
   $effect(() => {
     const canvas = overlayCanvas;
     if (!canvas) return;
-    drawLiveOverlay(canvas, {
-      area,
-      guide,
-      lights,
-      quad: detectedQuad,
-      candidates,
-      frame,
-      debug: DEBUG
-    });
+    drawLiveOverlay(canvas, { area, guide, lights });
   });
 
   $effect(() => {
@@ -1256,7 +1233,7 @@
           <label class="switch-row">
             <span>
               <b>Tự chụp khi đủ 4 mốc</b>
-              <small class="muted">Yêu cầu 3 khung liên tiếp ổn định</small>
+              <small class="muted">Cả 4 mốc xanh 2 nhịp liên tiếp</small>
             </span>
             <input
               type="checkbox"
@@ -1294,10 +1271,17 @@
           </header>
           <pre class="debug-pre selectable">{debugText}</pre>
           <p class="muted small">
-            Đèn: {lights.map((lit) => (lit ? '1' : '0')).join(' ')} · ổn định
-            {steadyCount}/{STABLE_TICKS} · tự chụp:
+            Đèn: {lights.map((lit) => (lit ? '1' : '0')).join(' ')} · xanh
+            {greenStreak}/{AUTO_CAPTURE_STREAK} · tự chụp:
             {settings.autoCapture ? 'bật' : 'tắt'}
           </p>
+          {#if probeSquares.length > 0}
+            <p class="muted small">
+              Ô: {probeSquares
+                .map((square) => `${square.fill.toFixed(2)}/${square.side.toFixed(0)}`)
+                .join(' ')}
+            </p>
+          {/if}
           <p class="muted small">
             Mở trang với <b>?debug=1</b> để có eruda. Ảnh trung gian hiện ở màn
             kết quả.

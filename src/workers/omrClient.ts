@@ -47,19 +47,14 @@ export class OmrWorkerClient {
   private sequence = 0;
   private pending = new Map<number, Pending>();
 
-  probe(
-    image: ImageLike,
-    rects: RectDto[],
-    frameSize: FrameSizeDto
-  ): Promise<ProbeResponse> {
+  probe(image: ImageLike, rects: RectDto[]): Promise<ProbeResponse> {
     const worker = this.ensureWorker();
     const id = ++this.sequence;
     const message: ProbeRequest = {
       type: 'probe',
       id,
       image: toImageBuffer(image),
-      rects,
-      frameSize
+      rects
     };
     return this.send(worker, message, [message.image.data]) as Promise<ProbeResponse>;
   }
