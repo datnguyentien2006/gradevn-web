@@ -11,6 +11,7 @@ import {
 } from '../../src/camera/overlayGeometry';
 import {
   scanLiveMarkerBoxes,
+  scanLiveMarkerBoxesDetailed,
   type LiveMarkerFrame
 } from '../../src/camera/liveMarkerScan';
 import { Rect } from '../../src/core/geometry';
@@ -170,6 +171,92 @@ describe('scanLiveMarkerBoxes', () => {
       false,
       false
     ]);
+  });
+});
+
+describe('quét lại ô trượt ở p75×0.8 (dự phòng iOS)', () => {
+  it('mốc xám 146 trên nền 232: mặc định thư viện bỏ, bật dự phòng cả 4 xanh', () => {
+    const frame = makeFrame(
+      CALIBRATION.width,
+      CALIBRATION.height,
+      apkMarkers(30, 146)
+    );
+    const strict = scanLiveMarkerBoxesDetailed(frame, apkRects());
+    expect(strict.map((detail) => detail.box.ok)).toEqual([
+      false,
+      false,
+      false,
+      false
+    ]);
+    expect(strict.every((detail) => !detail.usedFallback)).toBe(true);
+
+    const rescued = scanLiveMarkerBoxesDetailed(frame, apkRects(), {
+      allowFallback: true,
+      includeDiagnostics: true
+    });
+    expect(rescued.map((detail) => detail.box.ok)).toEqual([
+      true,
+      true,
+      true,
+      true
+    ]);
+    for (const detail of rescued) {
+      expect(detail.usedFallback).toBe(true);
+      expect(detail.thresholdFactor).toBe(0.8);
+      expect(detail.strictReason).toMatch(/no dark pixels/);
+      expect(detail.reason).toBe('FOUND');
+      expect(detail.diagnostics?.thresholdFactor).toBe(0.8);
+      expect(detail.diagnostics!.threshold).toBeCloseTo(
+        Math.max(30, Math.min(200, detail.diagnostics!.pageLevel * 0.8)),
+        5
+      );
+    }
+  });
+
+  it('mốc đen đạt ngưỡng chuẩn không chạy dự phòng', () => {
+    const frame = makeFrame(CALIBRATION.width, CALIBRATION.height, apkMarkers());
+    const details = scanLiveMarkerBoxesDetailed(frame, apkRects(), {
+      allowFallback: true,
+      includeDiagnostics: true
+    });
+    for (const detail of details) {
+      expect(detail.box.ok).toBe(true);
+      expect(detail.usedFallback).toBe(false);
+      expect(detail.strictReason).toBeNull();
+      expect(detail.thresholdFactor).toBe(0.5);
+      expect(detail.diagnostics?.thresholdFactor).toBe(0.5);
+    }
+  });
+
+  it('dự phòng không nới luật tâm và không sinh mốc trên khung trống', () => {
+    const shifted = makeFrame(
+      CALIBRATION.width,
+      CALIBRATION.height,
+      apkMarkers(30, 18, 95, 0)
+    );
+    const shiftedDetails = scanLiveMarkerBoxesDetailed(shifted, apkRects(), {
+      allowFallback: true
+    });
+    expect(shiftedDetails.map((detail) => detail.box.ok)).toEqual([
+      false,
+      false,
+      false,
+      false
+    ]);
+    expect(shiftedDetails[0].reason).toMatch(/centroid outside guide box/);
+
+    const empty = makeFrame(CALIBRATION.width, CALIBRATION.height, []);
+    const emptyDetails = scanLiveMarkerBoxesDetailed(empty, apkRects(), {
+      allowFallback: true,
+      includeDiagnostics: true
+    });
+    for (const detail of emptyDetails) {
+      expect(detail.box.ok).toBe(false);
+      expect(detail.usedFallback).toBe(true);
+      expect(detail.reason).toMatch(
+        /p75×0\.5: .*no dark pixels.* → p75×0\.8: .*no dark pixels/
+      );
+    }
   });
 });
 

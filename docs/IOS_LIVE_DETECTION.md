@@ -1,6 +1,6 @@
 # iOS live detection & capture alignment — root-cause analysis and fix plan
 
-Status: Parts 1–3 complete in code (analysis, diagnostics, fix). Sections 8–10 describe what shipped; section 7 lists what still requires a real-iPhone bundle.
+Status: Parts 1–3 complete in code (analysis, diagnostics, fix). Section 11 adds the real-iPhone confirmation: the live rectangles stayed 0/4 because of the strict `p75×0.5` live threshold; the fix adds an automatic per-rect retry at `p75×0.8`, and auto capture no longer has a separate on/off control.
 
 Reference implementation: `C:\Marker-td\gradevn` (Flutter, Android release APK). Web port: `C:\Gradevn-web`.
 No Dart file was modified for this analysis. `C:\Marker-td` stays read-only.
@@ -215,7 +215,7 @@ Defaults match Android; no grading-math change.
 1. **Live** — implemented
    - `probeOnce` keeps `readyState`/`videoWidth` guards, records frame/timing diagnostics, and every probe exception sets `probeStatus = 'error'` and shows a red banner on the scan screen. Worker errors are no longer invisible.
    - `byteLength === w*h*4` asserted in `captureVideoFrame`, `toImageBuffer` and the worker (`assertImageBuffer`).
-   - Dart per-rect rules remain the default (`p75×0.5`, minFill 0.6, aspect 0.6–1.65, side 0.12–0.95 of short rect, centroid inside guide rect). Opt-in setting **“Chế độ iOS dễ tính (mốc tương phản thấp)”** (debug panel, persisted in `localStorage`, default OFF) changes only the threshold factor to **0.8** for the live scan and the pinned capture scan. It is never enabled automatically.
+   - Dart per-rect rules remain the **first** pass (`p75×0.5`, minFill 0.6, aspect 0.6–1.65, side 0.12–0.95 of short rect, centroid inside guide rect). A rect that fails that pass is retried once at **`p75×0.8`** by the probe worker (`allowFallback`, section 11). The retry uses exactly the same fill/aspect/size/centroid rules and is reported in diagnostics (`usedFallback`, `strictReason`), so it is never silent. The debug-only **“Chế độ iOS dễ tính”** setting instead applies `p75×0.8` to *all* live rects and to the pinned capture scan for comparison; it stays default OFF.
    - No automatic orientation probe was added. The diagnostic bundle shows whether the frame is display-oriented. If it is not, an orientation probe can be designed with real data instead of guessed.
 2. **Capture** — implemented
    - Every grade request now calculates the post-warp round-trip verification, even for pinned quads (`diagnoseAlignment: true`, `verificationSkipped`). This is a diagnostic check; it does not change the grading formula.
@@ -239,6 +239,8 @@ Verification in a desktop browser (Vite dev server + a fake 1080×1920 camera st
 
 ## 10. Vietnamese summary (for the phone test)
 
+**Cập nhật 2026-10-31:** xem mục 11 — sau khi xác nhận trên iPhone thật, ô trượt ngưỡng chuẩn giờ tự quét lại ở `p75×0.8`; không cần gạt “Chế độ iOS dễ tính”, và không còn nút “Tự động” riêng.
+
 **Nguyên nhân đã xác nhận bằng code + mô phỏng**
 
 1. Logic quét 4 ô live trên web là bản port đúng của APK, nhưng ngưỡng “đen” là `p75×0.5` của vùng ROI. Khi giấy quá sáng/camera iPhone làm mốc in ra màu xám (chói, auto-exposure), mốc không còn “đen” theo ngưỡng → cả 4 ô báo không thấy mốc → luôn 0/4 dù mắt thấy mốc nằm trong ô. Mô phỏng đúng hiện tượng: mốc 146/giấy 232, 147/190, 130/210 đều cho 0000.
@@ -256,4 +258,35 @@ Verification in a desktop browser (Vite dev server + a fake 1080×1920 camera st
 - Thêm **“Chế độ iOS dễ tính (mốc tương phản thấp)”** trong bảng chẩn đoán, mặc định TẮT, đổi ngưỡng p75×0.5 → ×0.8 để so sánh; không tự bật.
 
 **Cần gửi lại sau khi test**: mở `https://gradevn-web.vercel.app/?debug=1`, đứng ở màn quét, bấm **“Lưu dữ liệu chẩn đoán”** (gửi RAW frame + 4 ảnh ROI ngưỡng + JSON). Sau đó chụp thử một phiếu (tự động hoặc nút Chụp), ở màn kết quả bấm **“Lưu dữ liệu chẩn đoán lần chụp”** (gửi RAW frame đã chụp + ảnh đã nắn + JSON có quad/verify/homography). Chỉ cần gửi đúng 2 gói đó là đủ để chốt nguyên nhân còn lại và kiểm tra bản sửa. Nếu vẫn 0/4, thử gạt **Chế độ iOS dễ tính** rồi gửi thêm một gói live nữa để so sánh.
+
+## 11. Real-iPhone confirmation and the fix (2026-10-31)
+
+After the capture fix, the user reported on a real iPhone Safari PWA that the flattened sheet is now correct (“Mốc dùng để nắn: detector toàn trang · kiểm chứng lệch 0.7 px”), but all four live rectangles still never turned green even with the printed squares inside them.
+
+### 11.1 Evidence (what isolates the cause)
+
+- The result line proves the **whole-page detector** rectified the captured sheet, i.e. the pinned per-rect scan found 0/4 on the very same captured frame. The frame’s pixels therefore contain a correct sheet; mapping, rotation and orientation cannot explain the failure.
+- The attached flattened screenshot (1284×2778) was measured with PIL: the printed corner squares are **134–150 luma** against a **200–210** page. The live ROI pass uses `p75×0.5 ≈ 100–105`, so no marker pixel counts as dark and every rect reports `no dark pixels`. The whole-page detector uses `gray < localMean×0.8 ≈ 145–160` and sees the same pixels. Two thresholds, same picture.
+- Synthetic reproduction with production code at 390×844 / frame 1080×1920, marker 140 vs page 210: **0000 at 0.5, 1111 at 0.8**. Marker side 0.13–0.18 of the guide box works at 0.8; side 0.10 is rejected by the size rule at both factors (possible secondary cause on another scene).
+
+### 11.2 Fix (live only)
+
+- `scanLiveMarkerBoxesDetailed` runs the strict APK pass first. If a rect is not green, the probe retries **that rect once** at `FALLBACK_THRESHOLD_FACTOR = 0.8` (`allowFallback`, enabled by the worker probe). This is a deliberate, surfaced relaxation of Dart’s live threshold: the APK factor is calibrated for printed paper, not for a screen photographed through an iPhone.
+- The retry keeps every other Dart rule identical (`minFill 0.6`, aspect 0.6–1.65, side 0.12–0.95 of the short rect, centroid inside the guide rect), so it cannot light up an empty frame, a shifted marker, or tiny/flat/oversized blobs. Regression tests cover each case.
+- Diagnostics: each rect now carries `thresholdFactor`, `usedFallback` and `strictReason`. The ROI card shows `FOUND · dự phòng p75×0.8` plus the strict failure, and the live export JSON includes the three fields.
+- The capture pipeline is unchanged: pinned scan at the configured factor (0.5 by default), then the detector, then the verified-quad safety. The fallback only affects live green lights.
+
+### 11.3 Auto capture
+
+- Removed the “Tự động” button from the camera footer and the `autoCapture` practice setting. Auto capture is always armed after two consecutive all-green ticks (160 ms at 80 ms/tick), as the APK does; the manual shutter and the photo picker remain.
+- `autoArmed` is still consumed by any capture and re-armed only after a non-green tick, so a sheet left in place after a failed grade does not loop captures.
+
+### 11.4 Tests and verification
+
+- 76 tests pass. New tests: grey 146/232 gives 0000 with the library default and 1111 with `allowFallback` (with `p75×0.8` diagnostics); no fallback is attempted when the strict pass already finds the marker; fallback adds no green on shifted-marker or empty frames.
+- Browser pass (headless Chromium 782×448, fake 1920×1080 camera whose four gray markers are 140 on a 210 page, i.e. strict threshold 113 / fallback 180.8):
+  - all four rectangles lit, status went `Đủ 4 mốc — giữ yên` → `Giữ yên — sẵn sàng chụp`;
+  - auto capture started with no control pressed (`Đang chụp 1/3…` → `Đang chấm khung 1/3…`); the synthetic frame has no answer grid, so grading failed, and the screen returned to live without re-capturing while the markers stayed green;
+  - the debug panel reported `FOUND · dự phòng p75×0.8` on all four cards, each with `quét chuẩn p75×0.5 trượt: no dark pixels (threshold 113, p75 226)`;
+  - the camera footer contains only `Thư viện` and the shutter — there is no `Tự động` control.
 

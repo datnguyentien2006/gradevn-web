@@ -29,9 +29,22 @@ export interface LiveMarkerBox {
   centroid: Offset | null;
 }
 
+/**
+ * Ngưỡng quét lại cho ô trượt ngưỡng chuẩn p75×0.5. Mốc in trên màn hình
+ * (iPhone quay màn hình laptop) thường xám ~140–150 trên nền ~210: ngưỡng
+ * chuẩn ~105 bỏ qua, ngưỡng 0.8 ~168 nhận được.
+ */
+export const FALLBACK_THRESHOLD_FACTOR = 0.8;
+
 export interface LiveMarkerScanOptions {
   /** Hệ số ngưỡng p75 (Dart: 0.5). Chế độ iOS dễ tính dùng 0.8. */
   thresholdFactor?: number;
+  /**
+   * Ô trượt ngưỡng chuẩn được quét lại một lần ở p75×0.8 (cùng mọi luật
+   * kích thước/hình dạng/tâm). Không bật ở mặc định thư viện để giữ đúng
+   * hành vi APK khi so sánh; app bật cho đường quét live.
+   */
+  allowFallback?: boolean;
   /** Kèm số liệu + mask từng ô. */
   includeDiagnostics?: boolean;
 }
@@ -47,6 +60,12 @@ export interface LiveMarkerBoxDetail {
   diagnostics: BlobScanDiagnostics | null;
   /** Lý do ngắn gọn để hiển thị/gửi kèm. */
   reason: string;
+  /** Hệ số ngưỡng của lần quét quyết định kết quả (0.5 chuẩn, 0.8 dự phòng). */
+  thresholdFactor: number;
+  /** Lần quét chuẩn trượt; kết quả đến từ lần quét lại 0.8. */
+  usedFallback: boolean;
+  /** Lý do lần quét chuẩn trượt (khi usedFallback). */
+  strictReason: string | null;
 }
 
 /**
@@ -73,11 +92,67 @@ export function scanLiveMarkerBoxesDetailed(
     .map((rect) => scanLiveMarkerBox(frame, rect, options));
 }
 
+interface LiveMarkerAttempt {
+  box: LiveMarkerBox;
+  guideRect: Rect;
+  guidePx: Rect;
+  scanPx: Rect;
+  diagnostics: BlobScanDiagnostics | null;
+  reason: string;
+  factor: number;
+}
+
 function scanLiveMarkerBox(
   frame: LiveMarkerFrame,
   rect: Rect,
   options: LiveMarkerScanOptions
 ): LiveMarkerBoxDetail {
+  const primaryFactor = options.thresholdFactor ?? 0.5;
+  const includeDiagnostics = options.includeDiagnostics ?? false;
+  let attempt = attemptLiveMarkerBox(frame, rect, primaryFactor, includeDiagnostics);
+  let usedFallback = false;
+  let strictReason: string | null = null;
+
+  if (
+    !attempt.box.ok &&
+    options.allowFallback === true &&
+    primaryFactor < FALLBACK_THRESHOLD_FACTOR
+  ) {
+    strictReason = attempt.reason;
+    usedFallback = true;
+    attempt = attemptLiveMarkerBox(
+      frame,
+      rect,
+      FALLBACK_THRESHOLD_FACTOR,
+      includeDiagnostics
+    );
+  }
+
+  const reason = attempt.box.ok
+    ? 'FOUND'
+    : usedFallback
+      ? `p75×${primaryFactor}: ${strictReason} → p75×${FALLBACK_THRESHOLD_FACTOR}: ${attempt.reason}`
+      : attempt.reason;
+
+  return {
+    box: attempt.box,
+    guideRect: attempt.guideRect,
+    guidePx: attempt.guidePx,
+    scanPx: attempt.scanPx,
+    diagnostics: attempt.diagnostics,
+    reason,
+    thresholdFactor: attempt.factor,
+    usedFallback,
+    strictReason
+  };
+}
+
+function attemptLiveMarkerBox(
+  frame: LiveMarkerFrame,
+  rect: Rect,
+  thresholdFactor: number,
+  includeDiagnostics: boolean
+): LiveMarkerAttempt {
   const { width, height, grayAt } = frame;
   const shortRect = Math.min(rect.width * width, rect.height * height);
   const expanded = expandFractionRect(rect, 1.5);
@@ -106,34 +181,35 @@ function scanLiveMarkerBox(
     region: scanPx,
     grayAt,
     ...limits,
-    thresholdFactor: options.thresholdFactor ?? 0.5,
-    includeMask: options.includeDiagnostics ?? false
+    thresholdFactor,
+    includeMask: includeDiagnostics
   };
   const { locate, diagnostics } = locateDarkBlobInRegionDetailed(locateOptions);
+  const detail = {
+    guideRect: rect,
+    guidePx,
+    scanPx,
+    diagnostics: includeDiagnostics ? diagnostics : null,
+    factor: thresholdFactor
+  };
 
   if (!locate) {
     return {
+      ...detail,
       box: { ok: false, fill: 0, side: 0, centroid: null },
-      guideRect: rect,
-      guidePx,
-      scanPx,
-      diagnostics: options.includeDiagnostics ? diagnostics : null,
       reason: describeFailure(diagnostics, limits)
     };
   }
   const center = new Offset(locate.centroid.dx / width, locate.centroid.dy / height);
   const ok = rect.contains(center);
   return {
+    ...detail,
     box: {
       ok,
       fill: locate.fill,
       side: locate.side,
       centroid: locate.centroid
     },
-    guideRect: rect,
-    guidePx,
-    scanPx,
-    diagnostics: options.includeDiagnostics ? diagnostics : null,
     reason: ok ? 'FOUND' : 'centroid outside guide box'
   };
 }

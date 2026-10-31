@@ -538,6 +538,9 @@
       squares: liveDetails.map((detail) => ({
         ok: detail.ok,
         reason: detail.reason,
+        thresholdFactor: detail.thresholdFactor,
+        usedFallback: detail.usedFallback,
+        strictReason: detail.strictReason,
         centroid: detail.centroid,
         guidePx: detail.guidePx,
         scanPx: detail.scanPx,
@@ -964,7 +967,6 @@
     if (
       greenStreak >= AUTO_CAPTURE_STREAK &&
       ready &&
-      settings.autoCapture &&
       autoArmed &&
       !busy &&
       mode === 'live'
@@ -1258,12 +1260,6 @@
     result = null;
     location.hash =
       contestId != null ? `#/contests/${contestId}` : '#/';
-  }
-
-  function toggleAuto(): void {
-    settings = { ...settings, autoCapture: !settings.autoCapture };
-    savePracticeSettings(settings);
-    if (!settings.autoCapture) autoArmed = true;
   }
 
   function openSettings(): void {
@@ -1784,32 +1780,9 @@
               </svg>
             </span>
           </button>
-
-          <button
-            class="round-btn"
-            class:active={settings.autoCapture}
-            onclick={toggleAuto}
-            aria-pressed={settings.autoCapture}
-            aria-label="Bật hoặc tắt tự chụp"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M13 2L5 13h5l-1 9 8-11h-5z"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.7"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <span>Tự động</span>
-          </button>
         </div>
         <p class="hint">
-          {#if settings.autoCapture}
-            Đưa phiếu vào 4 ô — đèn xanh cả 4 và giữ yên để tự chụp.
-          {:else}
-            Đưa phiếu vào 4 ô, đèn xanh cả 4 rồi nhấn nút chụp.
-          {/if}
+          Đưa phiếu vào 4 ô — đèn xanh cả 4 và giữ yên để tự chụp.
         </p>
       </footer>
     {/if}
@@ -1863,18 +1836,6 @@
             <span class="muted small">Đề mẫu khớp fixtures 37/40 → 9.25</span>
           </div>
 
-          <label class="switch-row">
-            <span>
-              <b>Tự chụp khi đủ 4 mốc</b>
-              <small class="muted">Cả 4 mốc xanh 2 nhịp liên tiếp</small>
-            </span>
-            <input
-              type="checkbox"
-              checked={settings.autoCapture}
-              onchange={toggleAuto}
-            />
-          </label>
-
           <div class="track-box">
             <p><b>Camera:</b> {trackText}</p>
             <p class="muted small">
@@ -1925,7 +1886,10 @@
             </span>
             <span>{liveTicksPerSec.toFixed(1)} nhịp/s</span>
             <span>{probeMs.toFixed(0)} ms</span>
-            <span>p75×{thresholdFactor()}</span>
+            <span>
+              p75×{thresholdFactor()}
+              {thresholdFactor() < 0.8 ? '(ô trượt: ×0.8)' : ''}
+            </span>
           </div>
           {#if probeError}
             <p class="diag-error selectable">{probeError}</p>
@@ -1947,7 +1911,8 @@ settings: {JSON.stringify(trackSettings() ?? {})}</pre>
             <span>
               <b>Chế độ iOS dễ tính (mốc tương phản thấp)</b>
               <small class="muted">
-                Ngưỡng p75×0.8 thay vì ×0.5 của APK — chỉ để so sánh, mặc định tắt.
+                Quét mọi ô ở p75×0.8 thay vì ×0.5 của APK — chỉ để so sánh,
+                mặc định tắt. Ô trượt ×0.5 vẫn tự quét lại ×0.8.
               </small>
             </span>
             <input
@@ -1962,9 +1927,18 @@ settings: {JSON.stringify(trackSettings() ?? {})}</pre>
               <header class="roi-head">
                 <b>Ô {index + 1}</b>
                 <span class="tag" class:tag-ok={detail.ok} class:tag-bad={!detail.ok}>
-                  {detail.ok ? 'FOUND' : detail.reason}
+                  {#if detail.ok}
+                    {detail.usedFallback ? 'FOUND · dự phòng p75×0.8' : 'FOUND'}
+                  {:else}
+                    {detail.reason}
+                  {/if}
                 </span>
               </header>
+              {#if detail.usedFallback && detail.strictReason}
+                <p class="diag-line">
+                  quét chuẩn p75×{thresholdFactor()} trượt: {detail.strictReason}
+                </p>
+              {/if}
               {#if detail.diagnostics}
                 <p class="diag-line">
                   ô ghim {detail.guidePx.left.toFixed(0)},{detail.guidePx.top.toFixed(0)} →
@@ -2396,12 +2370,6 @@ settings: {JSON.stringify(trackSettings() ?? {})}</pre>
   .round-btn svg {
     width: 23px;
     height: 23px;
-  }
-
-  .round-btn.active {
-    border-color: color-mix(in srgb, var(--neon) 60%, transparent);
-    color: var(--neon);
-    background: rgba(30, 46, 18, 0.72);
   }
 
   .shutter {

@@ -21,15 +21,16 @@ dự án gốc `C:\Marker-td` được giữ nguyên, không sửa.
 Đã kiểm chứng trong phiên phát triển:
 
 - `npx tsc --noEmit`: sạch. `npm run check`: 0 lỗi, 0 cảnh báo.
-- `npm test`: 10 file, **73 test pass**, gồm hai fixture PNG khớp tuyệt đối với
+- `npm test`: 10 file, **76 test pass**, gồm hai fixture PNG khớp tuyệt đối với
   Dart (`standard40`: SBD 000413, mã đề 001, 9.25/10; `noisy40`: 000042, 007,
-  9.75/10), 9 test quét mốc live port từ APK và 17 test chẩn đoán capture
+  9.75/10), 12 test quét mốc live port từ APK (kèm quét lại `p75×0.8` cho ô
+  trượt) và 17 test chẩn đoán capture
   (cover mapping 390×844, xoay 0/90/180/270, lý do loại ô, stride RGBA,
   cảnh báo quad ghim sai).
 - E2E trên trình duyệt: tạo key → quét fixture → lưu phiếu → xem kết quả/stats →
   sửa SBD và chấm lại → reload vẫn còn dữ liệu → backup/restore → xuất XLSX.
-- Build production: JS chính **225.92 kB (74.31 kB gzip)**; XLSX tách chunk lazy
-  **427.62 kB**; worker 37.57 kB; CSS **44.59 kB (8.03 kB gzip)**; eruda
+- Build production: JS chính **225.45 kB (74.27 kB gzip)**; XLSX tách chunk lazy
+  **427.62 kB**; worker 38.01 kB; CSS **44.46 kB (8.00 kB gzip)**; eruda
   **506.26 kB**, chỉ tải khi mở `?debug=1`.
 - Lighthouse 11.7.1 (mobile emulation, đo trên bản preview production trước thay
   đổi quét mốc live): Performance **99**, Accessibility **100**, Best Practices
@@ -96,7 +97,7 @@ npm run preview
 ## Kiểm thử
 
 ```bash
-npm test          # 73 test
+npm test          # 76 test
 npm run check     # svelte-check
 npx tsc --noEmit  # type-check
 ```

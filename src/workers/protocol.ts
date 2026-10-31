@@ -117,6 +117,11 @@ export interface RectProbeDetailDto extends SquareProbeDto {
   scanPx: RectPxDto;
   reason: string;
   diagnostics: BlobDiagnosticsDto | null;
+  /** Hệ số ngưỡng của lần quét quyết định (0.5 chuẩn, 0.8 dự phòng). */
+  thresholdFactor: number;
+  /** Ô trượt ngưỡng chuẩn và đã được quét lại ở p75×0.8. */
+  usedFallback: boolean;
+  strictReason: string | null;
 }
 
 export interface ProbeResponse {

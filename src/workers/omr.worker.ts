@@ -67,6 +67,7 @@ function handleProbe(request: ProbeRequest): void {
       rects,
       {
         thresholdFactor: request.thresholdFactor ?? 0.5,
+        allowFallback: true,
         includeDiagnostics
       }
     );
@@ -321,7 +322,10 @@ function toRectProbeDetailDto(detail: LiveMarkerBoxDetail): RectProbeDetailDto {
     reason: detail.reason,
     diagnostics: detail.diagnostics
       ? toBlobDiagnosticsDto(detail.diagnostics)
-      : null
+      : null,
+    thresholdFactor: detail.thresholdFactor,
+    usedFallback: detail.usedFallback,
+    strictReason: detail.strictReason
   };
 }
 

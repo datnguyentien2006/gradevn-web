@@ -48,9 +48,12 @@ Không có sai lệch density nào làm đổi đáp án trên fixture.
    `maxSidePx = 0.95×cạnh ngắn ô`, ngưỡng đen = phân vị 75 của cửa sổ × 0.5
    kẹp 30..200 (`src/core/markerBlobScan.ts`). Ô chỉ xanh khi tâm blob nằm
    trong ô gốc; nhịp live không dùng detector toàn trang, giống APK (R11).
-   Cả 4 ô xanh 2 nhịp liên tiếp (`AUTO_CAPTURE_STREAK = 2`) thì tự chụp; sau
-   đó phải có nhịp rời 4/4 mới bật lại (`autoArmed` như APK), tránh vòng
-   chụp lặp. Nút "Tự động" là tuỳ chọn web-only; tắt thì chỉ chụp bằng nút.
+   Cả 4 ô xanh 2 nhịp liên tiếp (`AUTO_CAPTURE_STREAK = 2`) thì tự chụp —
+   luôn bật, không có nút riêng; sau đó phải có nhịp rời 4/4 mới bật lại
+   (`autoArmed` như APK), tránh vòng chụp lặp. Ô trượt ngưỡng chuẩn
+   `p75×0.5` được quét lại một lần ở `p75×0.8` (giữ nguyên mọi luật blob)
+   để nhận mốc xám in trên màn hình; kết quả ghi `usedFallback` /
+   `strictReason` trong chẩn đoán.
    Vẽ ô cũng theo APK: ô vuông trắng mờ 0.32 (0.55 khi đọc được), viền xanh
    `#2E7D32` dày 3, không số/không chấm (`src/camera/render.ts`).
    Khi chụp, web vẫn lấy 3 khung (`CAPTURE_FRAMES = 3`) rồi bỏ phiếu chữ ký
@@ -135,9 +138,12 @@ Muốn sửa cần quyết định của chủ dự án vì sẽ làm web khác 
     trạng thái "Đủ 4 mốc — giữ yên"; cảnh dọc 70 px có 20.342 pixel xanh trên
     overlay.
   - mốc 190 px (quá gần, vượt `maxSidePx`), 16 px (quá xa, dưới `minSidePx`),
-    lệch ngang 0.67 chiều rộng ô (tâm blob ngoài ô gốc), mốc xám 146 trên nền
-    210 (dưới ngưỡng tương phản): 0/4, không viền xanh — không có xanh giả.
-  - tự chụp (4 mốc 70 px, bật "Tự động"): vào màn kết quả "3/3 khung · đồng
+    lệch ngang 0.67 chiều rộng ô (tâm blob ngoài ô gốc): 0/4, không viền
+    xanh — không có xanh giả.
+  - mốc xám 146 trên nền 210: theo ngưỡng APK là 0/4; nay ô trượt tự quét
+    lại `p75×0.8` nên xanh, kèm `usedFallback: true` (xem mục 11 của
+    `IOS_LIVE_DETECTION.md`).
+  - tự chụp (4 mốc 70 px, không cần nút): vào màn kết quả "3/3 khung · đồng
     thuận 100%", 0 đúng / 0 sai / 40 trống (khung dựng chỉ có mốc); bấm "Chụp
     phiếu khác" về live "Giữ yên — sẵn sàng chụp", không tự chụp lặp.
   - tải `standard40.png` qua input file trong trình duyệt: 9.25,

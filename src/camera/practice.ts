@@ -16,13 +16,11 @@ export const SAMPLE_ANSWERS =
 export interface PracticeSettings {
   examCode: string;
   answers: string;
-  autoCapture: boolean;
 }
 
 export const DEFAULT_PRACTICE: PracticeSettings = {
   examCode: SAMPLE_EXAM_CODE,
-  answers: SAMPLE_ANSWERS,
-  autoCapture: true
+  answers: SAMPLE_ANSWERS
 };
 
 export function loadPracticeSettings(): PracticeSettings {
@@ -32,8 +30,7 @@ export function loadPracticeSettings(): PracticeSettings {
     const parsed = JSON.parse(raw) as Partial<PracticeSettings>;
     return {
       examCode: normalizeExamCode(String(parsed.examCode ?? DEFAULT_PRACTICE.examCode)),
-      answers: normalizeAnswerSequence(String(parsed.answers ?? DEFAULT_PRACTICE.answers)),
-      autoCapture: parsed.autoCapture !== false
+      answers: normalizeAnswerSequence(String(parsed.answers ?? DEFAULT_PRACTICE.answers))
     };
   } catch {
     return { ...DEFAULT_PRACTICE };
@@ -46,8 +43,7 @@ export function savePracticeSettings(settings: PracticeSettings): void {
       STORAGE_KEY,
       JSON.stringify({
         examCode: normalizeExamCode(settings.examCode),
-        answers: normalizeAnswerSequence(settings.answers),
-        autoCapture: settings.autoCapture
+        answers: normalizeAnswerSequence(settings.answers)
       })
     );
   } catch {
