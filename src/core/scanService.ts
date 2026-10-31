@@ -14,7 +14,7 @@ import {
   Size
 } from './geometry';
 import { DEFAULT_OMR_TUNING, measureGrayPlanar, measureRgba, OmrTuning, SheetDensities } from './density';
-import { locateDarkBlobInRegion } from './markerBlobScan';
+import { FALLBACK_THRESHOLD_FACTOR, locateDarkBlobInRegion } from './markerBlobScan';
 import { DensityBlock, OmrDecoder } from './omrDecoder';
 import { SheetLayout } from './sheetLayout';
 import {
@@ -82,6 +82,8 @@ export type QuadSource = 'known' | 'overlayRects' | 'detector' | 'overlayQuad';
 export interface PhotoScanDiagnostics {
   quadSource: QuadSource;
   pinnedQuad: AlignmentQuad | null;
+  /** Ngưỡng thực dùng cho quad ghim: 0.5 chuẩn, 0.8 dự phòng; null khi không có. */
+  pinnedThresholdFactor: number | null;
   detectorQuad: AlignmentQuad | null;
   targetQuad: AlignmentQuad;
   /** Kiểm chứng tính cho chẩn đoán — kể cả quad ghim (Dart bỏ qua). */
@@ -144,6 +146,12 @@ export interface RgbaScanImage {
   height: number;
 }
 
+export interface OverlayRectResolution {
+  quad: AlignmentQuad;
+  /** 0.5 = ngưỡng chuẩn; 0.8 = quét lại dự phòng. */
+  thresholdFactor: number;
+}
+
 export interface ScanPhotoOptions {
   spec: SheetSpec;
   tuning?: OmrTuning;
@@ -158,6 +166,12 @@ export interface ScanPhotoOptions {
   diagnoseAlignment?: boolean;
   /** Hệ số ngưỡng quét blob trong ô ghim (Dart 0.5; dễ tính 0.8). */
   thresholdFactor?: number;
+  /**
+   * Ô ghim trượt ngưỡng chuẩn được quét lại một lần ở p75×0.8 (cùng mọi
+   * luật), giống đường live. Mặc định bật cho ảnh chụp; tắt để so sánh
+   * đúng hành vi Dart.
+   */
+  allowPinnedFallback?: boolean;
 }
 
 export class OmrScanService {
@@ -223,13 +237,15 @@ export class OmrScanService {
     let quadFromDetector = false;
     let quadSource: QuadSource = 'detector';
     let pinnedQuad: AlignmentQuad | null = null;
+    let pinnedThresholdFactor: number | null = null;
     let detectorQuad: AlignmentQuad | null = null;
+    const allowPinnedFallback = options.allowPinnedFallback ?? true;
 
     if (options.knownQuad) {
       quad = options.knownQuad;
       quadSource = 'known';
     } else if (options.overlayRects) {
-      pinnedQuad = this.resolveOverlayRects(
+      const pinned = this.resolveOverlayRects(
         srcBytes,
         srcCh,
         srcW,
@@ -237,8 +253,11 @@ export class OmrScanService {
         options.overlayRects,
         options.frameSize ?? new Size(1, 1),
         null,
-        thresholdFactor
+        thresholdFactor,
+        allowPinnedFallback
       );
+      pinnedQuad = pinned?.quad ?? null;
+      pinnedThresholdFactor = pinned?.thresholdFactor ?? null;
       quad = pinnedQuad;
       if (pinnedQuad) {
         quadSource = 'overlayRects';
@@ -318,9 +337,10 @@ export class OmrScanService {
           options.overlayRects,
           options.frameSize ?? new Size(1, 1),
           current,
-          thresholdFactor
+          thresholdFactor,
+          allowPinnedFallback
         );
-        if (altRects) alts.push({ quad: altRects, source: 'overlayRects' });
+        if (altRects) alts.push({ quad: altRects.quad, source: 'overlayRects' });
       } else if (quadFromDetector) {
         if (options.overlayRects) {
           const altRects = this.resolveOverlayRects(
@@ -331,9 +351,10 @@ export class OmrScanService {
             options.overlayRects,
             options.frameSize ?? new Size(1, 1),
             current,
-            thresholdFactor
+            thresholdFactor,
+            allowPinnedFallback
           );
-          if (altRects) alts.push({ quad: altRects, source: 'overlayRects' });
+          if (altRects) alts.push({ quad: altRects.quad, source: 'overlayRects' });
         }
         if (options.overlayQuad) {
           const altQuad = this.resolveOverlayQuad(
@@ -427,6 +448,7 @@ export class OmrScanService {
       ? {
           quadSource,
           pinnedQuad,
+          pinnedThresholdFactor,
           detectorQuad,
           targetQuad,
           alignmentCheck,
@@ -537,7 +559,15 @@ export class OmrScanService {
     return best;
   }
 
-  /** Quét 4 ô ghim trên preview để lấy tâm blob đen trong từng ô. */
+  /**
+   * Quét 4 ô ghim trên preview để lấy tâm blob đen trong từng ô.
+   *
+   * [allowThresholdFallback] — khác Dart: nếu TOÀN BỘ 4 ô trượt ngưỡng chuẩn
+   * p75×[thresholdFactor] thì quét lại cả nhóm ở p75×0.8 trước khi bỏ cuộc.
+   * Mốc in mờ (màn hình/giấy thiếu sáng) mà đường live đã nhận bằng 0.8 sẽ
+   * không còn rơi xuống detector toàn ảnh — nguyên nhân hai góc dưới bị thay
+   * bằng vật tối ngoài tờ giấy.
+   */
   resolveOverlayRects(
     bytes: Uint8Array | Uint8ClampedArray,
     channels: number,
@@ -546,8 +576,9 @@ export class OmrScanService {
     overlayRects: Rect[],
     frameSize: Size,
     exclude: AlignmentQuad | null = null,
-    thresholdFactor = 0.5
-  ): AlignmentQuad | null {
+    thresholdFactor = 0.5,
+    allowThresholdFallback = false
+  ): OverlayRectResolution | null {
     if (overlayRects.length < 4) return null;
     const size = new Size(imageWidth, imageHeight);
     const fw = frameSize.width;
@@ -575,63 +606,71 @@ export class OmrScanService {
           }
         ];
 
-    let best: AlignmentQuad | null = null;
-    let bestScore = -1;
-    for (const { fwd, inv } of variants) {
-      const locates: { centroid: Offset; fill: number; side: number }[] = [];
-      let worstFill = Infinity;
-      let ok = true;
-      for (const rect of overlayRects.slice(0, 4)) {
-        const expanded = expandFractionRect(rect, 1.5);
-        const c0 = fwd(expanded.topLeft);
-        const c1 = fwd(expanded.bottomRight);
-        const region = new Rect(
-          Math.min(c0.dx, c1.dx) * size.width,
-          Math.min(c0.dy, c1.dy) * size.height,
-          Math.max(c0.dx, c1.dx) * size.width,
-          Math.max(c0.dy, c1.dy) * size.height
-        );
-        const locate = locateDarkBlobInRect(
-          bytes,
-          channels,
-          imageWidth,
-          imageHeight,
-          region,
-          thresholdFactor
-        );
-        if (!locate) {
-          ok = false;
-          break;
+    const factors =
+      allowThresholdFallback && thresholdFactor < FALLBACK_THRESHOLD_FACTOR
+        ? [thresholdFactor, FALLBACK_THRESHOLD_FACTOR]
+        : [thresholdFactor];
+
+    for (const factor of factors) {
+      let best: AlignmentQuad | null = null;
+      let bestScore = -1;
+      for (const { fwd, inv } of variants) {
+        const locates: { centroid: Offset; fill: number; side: number }[] = [];
+        let worstFill = Infinity;
+        let ok = true;
+        for (const rect of overlayRects.slice(0, 4)) {
+          const expanded = expandFractionRect(rect, 1.5);
+          const c0 = fwd(expanded.topLeft);
+          const c1 = fwd(expanded.bottomRight);
+          const region = new Rect(
+            Math.min(c0.dx, c1.dx) * size.width,
+            Math.min(c0.dy, c1.dy) * size.height,
+            Math.max(c0.dx, c1.dx) * size.width,
+            Math.max(c0.dy, c1.dy) * size.height
+          );
+          const locate = locateDarkBlobInRect(
+            bytes,
+            channels,
+            imageWidth,
+            imageHeight,
+            region,
+            factor
+          );
+          if (!locate) {
+            ok = false;
+            break;
+          }
+          const cFrac = inv(
+            new Offset(locate.centroid.dx / size.width, locate.centroid.dy / size.height)
+          );
+          if (!rect.contains(cFrac)) {
+            ok = false;
+            break;
+          }
+          locates.push(locate);
+          worstFill = Math.min(worstFill, locate.fill);
         }
-        const cFrac = inv(
-          new Offset(locate.centroid.dx / size.width, locate.centroid.dy / size.height)
+        if (!ok || worstFill < 0.04) continue;
+        const sides = locates.map((l) => l.side);
+        const sMin = Math.min(...sides);
+        const sMax = Math.max(...sides);
+        if (sMin <= 0 || sMax / sMin > 2.4) continue;
+        const quad = new AlignmentQuad(
+          locates[0].centroid,
+          locates[1].centroid,
+          locates[2].centroid,
+          locates[3].centroid
         );
-        if (!rect.contains(cFrac)) {
-          ok = false;
-          break;
+        if (!plausibleQuad(quad)) continue;
+        if (exclude && quadNearlyEqual(quad, exclude)) continue;
+        if (worstFill > bestScore) {
+          bestScore = worstFill;
+          best = quad;
         }
-        locates.push(locate);
-        worstFill = Math.min(worstFill, locate.fill);
       }
-      if (!ok || worstFill < 0.04) continue;
-      const sides = locates.map((l) => l.side);
-      const sMin = Math.min(...sides);
-      const sMax = Math.max(...sides);
-      if (sMin <= 0 || sMax / sMin > 2.4) continue;
-      const quad = new AlignmentQuad(
-        locates[0].centroid,
-        locates[1].centroid,
-        locates[2].centroid,
-        locates[3].centroid
-      );
-      if (!plausibleQuad(quad)) continue;
-      if (exclude && quadNearlyEqual(quad, exclude)) continue;
-      if (worstFill > bestScore) {
-        bestScore = worstFill;
-        best = quad;
-      }
+      if (best) return { quad: best, thresholdFactor: factor };
     }
-    return best;
+    return null;
   }
 
   scan(

@@ -174,6 +174,8 @@ export interface GradeDiagnosticsDto {
   quadSource: QuadSourceDto;
   quad: QuadDto;
   pinnedQuad: QuadDto | null;
+  /** Ngưỡng thực dùng cho quad ghim: 0.5 chuẩn, 0.8 quét lại; null khi không có. */
+  pinnedThresholdFactor: number | null;
   detectorQuad: QuadDto | null;
   targetQuad: QuadDto;
   /** Kiểm chứng round-trip tính cho chẩn đoán (kể cả nhánh ghim). */

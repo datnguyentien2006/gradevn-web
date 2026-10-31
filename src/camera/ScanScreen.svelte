@@ -341,7 +341,11 @@
       }`
     );
     lines.push(`Quad dùng: ${quadLine(diagnostics.quad)}`);
-    lines.push(`Quad ghim: ${quadLine(diagnostics.pinnedQuad)}`);
+    lines.push(
+      `Quad ghim: ${quadLine(diagnostics.pinnedQuad)}${
+        diagnostics.pinnedThresholdFactor === 0.8 ? ' · quét lại p75×0.8' : ''
+      }`
+    );
     lines.push(`Quad detector: ${quadLine(diagnostics.detectorQuad)}`);
     lines.push(`Quad đích: ${quadLine(diagnostics.targetQuad)}`);
     const check = diagnostics.alignmentCheck;
@@ -599,6 +603,7 @@
       quadSourceLabel: quadSourceLabel(diagnostics?.quadSource),
       quadUsed: graded?.quad ?? null,
       pinnedQuad: diagnostics?.pinnedQuad ?? null,
+      pinnedThresholdFactor: diagnostics?.pinnedThresholdFactor ?? null,
       detectorQuad: diagnostics?.detectorQuad ?? null,
       targetQuad: diagnostics?.targetQuad ?? null,
       homography: diagnostics?.homography ?? null,
@@ -1569,6 +1574,9 @@
       {#if result.diagnostics}
         <p class="muted small">
           Mốc dùng để nắn: {quadSourceLabel(result.diagnostics.quadSource)}
+          {#if result.diagnostics.quadSource === 'overlayRects' && result.diagnostics.pinnedThresholdFactor === 0.8}
+            · ô ghim quét lại p75×0.8
+          {/if}
           {#if result.diagnostics.alignmentCheck}
             · kiểm chứng lệch
             {result.diagnostics.alignmentCheck.maxOffset.toFixed(1)} px

@@ -1,6 +1,6 @@
 # iOS live detection & capture alignment — root-cause analysis and fix plan
 
-Status: Parts 1–3 complete in code (analysis, diagnostics, fix). Section 11 adds the real-iPhone confirmation: the live rectangles stayed 0/4 because of the strict `p75×0.5` live threshold; the fix adds an automatic per-rect retry at `p75×0.8`, and auto capture no longer has a separate on/off control.
+Status: Parts 1–3 complete in code (analysis, diagnostics, fix). Section 11 adds the real-iPhone confirmation: the live rectangles stayed 0/4 because of the strict `p75×0.5` live threshold; the fix adds an automatic per-rect retry at `p75×0.8`, and auto capture no longer has a separate on/off control. Section 12 fixes the follow-up capture bug: the same low-contrast failure was still present in the pinned four-rect scan at capture time, so the pipeline fell to the whole-page detector and two bottom corners were wrong.
 
 Reference implementation: `C:\Marker-td\gradevn` (Flutter, Android release APK). Web port: `C:\Gradevn-web`.
 No Dart file was modified for this analysis. `C:\Marker-td` stays read-only.
@@ -241,6 +241,8 @@ Verification in a desktop browser (Vite dev server + a fake 1080×1920 camera st
 
 **Cập nhật 2026-10-31:** xem mục 11 — sau khi xác nhận trên iPhone thật, ô trượt ngưỡng chuẩn giờ tự quét lại ở `p75×0.8`; không cần gạt “Chế độ iOS dễ tính”, và không còn nút “Tự động” riêng.
 
+**Cập nhật 2026-10-31 (lần 2):** xem mục 12 — 4 ô live đã xanh nhưng ảnh nắn vẫn sai 2 mốc dưới, vì đường chụp còn quét 4 ô ghim ở `p75×0.5` nghiêm ngặt rồi rơi xuống detector toàn ảnh (detector bắt vật tối ngoài tờ giấy làm 2 góc dưới). Nay ô ghim khi chụp cũng quét lại `p75×0.8` trước khi bỏ cuộc; dòng kết quả ghi “ô ghim quét lại p75×0.8”.
+
 **Nguyên nhân đã xác nhận bằng code + mô phỏng**
 
 1. Logic quét 4 ô live trên web là bản port đúng của APK, nhưng ngưỡng “đen” là `p75×0.5` của vùng ROI. Khi giấy quá sáng/camera iPhone làm mốc in ra màu xám (chói, auto-exposure), mốc không còn “đen” theo ngưỡng → cả 4 ô báo không thấy mốc → luôn 0/4 dù mắt thấy mốc nằm trong ô. Mô phỏng đúng hiện tượng: mốc 146/giấy 232, 147/190, 130/210 đều cho 0000.
@@ -274,7 +276,7 @@ After the capture fix, the user reported on a real iPhone Safari PWA that the fl
 - `scanLiveMarkerBoxesDetailed` runs the strict APK pass first. If a rect is not green, the probe retries **that rect once** at `FALLBACK_THRESHOLD_FACTOR = 0.8` (`allowFallback`, enabled by the worker probe). This is a deliberate, surfaced relaxation of Dart’s live threshold: the APK factor is calibrated for printed paper, not for a screen photographed through an iPhone.
 - The retry keeps every other Dart rule identical (`minFill 0.6`, aspect 0.6–1.65, side 0.12–0.95 of the short rect, centroid inside the guide rect), so it cannot light up an empty frame, a shifted marker, or tiny/flat/oversized blobs. Regression tests cover each case.
 - Diagnostics: each rect now carries `thresholdFactor`, `usedFallback` and `strictReason`. The ROI card shows `FOUND · dự phòng p75×0.8` plus the strict failure, and the live export JSON includes the three fields.
-- The capture pipeline is unchanged: pinned scan at the configured factor (0.5 by default), then the detector, then the verified-quad safety. The fallback only affects live green lights.
+- The capture pipeline was left unchanged at that point: pinned scan at the configured factor (0.5 by default), then the detector, then the verified-quad safety. Section 12 shows that this was the remaining hole and fixes it with the same retry.
 
 ### 11.3 Auto capture
 
@@ -289,4 +291,37 @@ After the capture fix, the user reported on a real iPhone Safari PWA that the fl
   - auto capture started with no control pressed (`Đang chụp 1/3…` → `Đang chấm khung 1/3…`); the synthetic frame has no answer grid, so grading failed, and the screen returned to live without re-capturing while the markers stayed green;
   - the debug panel reported `FOUND · dự phòng p75×0.8` on all four cards, each with `quét chuẩn p75×0.5 trượt: no dark pixels (threshold 113, p75 226)`;
   - the camera footer contains only `Thư viện` and the shutter — there is no `Tự động` control.
+
+## 12. Capture-side follow-up: the pinned four-rect scan now retries at p75×0.8 (2026-10-31)
+
+### 12.1 Symptom after the live fix
+
+On the same real iPhone, all four live rectangles now turn green and auto capture fires, but the flattened sheet is still wrong: the **top two** green template circles sit on the printed markers, the **bottom two** are far below the sheet (`web_05.jpg`). The result line reads `Mốc dùng để nắn: detector toàn trang · kiểm chứng lệch 319.1 px`, with the non-blocking warning.
+
+### 12.2 Root cause
+
+- Live green lights and the capture quad use the **same threshold** but are different code paths. Section 11.2 added the `p75×0.8` retry to the live probe **only**; the capture still called `resolveOverlayRects` with the strict Dart factor 0.5 (`scanService.ts:244-271`, `resolveOverlayRects` at `:571-612`).
+- With the printed markers at 134–150 luma against a 200–210 page, no ROI pixel is below `p75×0.5 ≈ 100–105`, so the pinned scan returned null on every captured frame (same arithmetic as section 11.1).
+- The pipeline fell to the whole-page detector. `pickCornerQuad` takes convex-hull extremes; dark near-square objects **outside the paper** at the bottom of the frame win the bottom two corners. The top corners stay right because their markers are the extreme points there.
+- The pinned quad was null, so the trusted-quad shortcut did not apply. The detector quad was verified, failed by 319 px, but `requireVerifiedWarp:false` (Dart R19b) let grading continue with the wrong homography. The green circles are always drawn at the **template** marker positions (`drawWarpedScan`), so a wrong quad shows up exactly as “top aligned, bottom far off”.
+- Reproduced with production code: 1600×900 scene, page 205, markers 140, two 60 px dark blocks below the page. With `allowPinnedFallback:false`: `quadSource='detector'`, pinned null, bottom corners y≈819 vs true 621, warning true. Same scene with the default: `quadSource='overlayRects'`, `pinnedThresholdFactor=0.8`, all four corners within 2 px (`tests/camera/pinnedOverlayFallback.test.ts`).
+
+### 12.3 Fix
+
+- `resolveOverlayRects` gained `allowThresholdFallback`. When enabled and the configured factor is below `FALLBACK_THRESHOLD_FACTOR` (0.8), it retries the **whole four-rect group** (both orientation variants) at 0.8, but only after the strict pass returns no quad; rects from different factors are never mixed.
+- `scanPhoto` enables it by default (`allowPinnedFallback`, default true) for the initial pinned scan and for the rescue alternatives. The quad is still the centroid quad of the four detected markers; the grading math is untouched.
+- Diagnostics: `PhotoScanDiagnostics.pinnedThresholdFactor` → `GradeDiagnosticsDto.pinnedThresholdFactor` → result line “· ô ghim quét lại p75×0.8” and the capture bundle JSON. `allowPinnedFallback:false` reproduces the old Dart-strict behavior for A/B comparison.
+- Dart parity: `scan_service.dart` `_resolveOverlayRects` is fixed at 0.5 with no retry. This is a web-only addition, like the live retry; the project owner should decide whether it also goes upstream.
+
+### 12.4 Residual diagnostic behavior (measured, not changed)
+
+- Since the earlier session the round-trip check also runs on **pinned** quads (Dart skips it), with the Dart tolerance of 6 px on the 1576×2205 page. The pinned corners are blob centroids on a subsampled grid (scan step 6 px at 1600×900, up to 10 px at 1600×2844). After the warp, the quantization can measure ~6.4 px even when the quad is correct to ~1 px. The warning is therefore conservative on pinned quads.
+- Rescue still only adopts an alternative quad if it **passes** the check, so the wrong detector quad from this bug cannot be re-adopted: it fails, the correctly found pinned quad is kept. In the browser E2E below the pinned check was marginal and the detector alternative passed at 0.5 px, so the result line showed `detector toàn trang … đã thay bằng quad đạt kiểm chứng`; when the detector is the one that is fooled, no rescue happens and the result line keeps the pinned quad with the warning.
+- This margin is not changed here. If the warning still appears on a correctly flattened real sheet, the two options are (a) refine each pinned centroid at full resolution before building the quad, or (b) derive a pinned-only diagnostic tolerance from the ROI scan step. Both are web-only changes and need the owner's approval.
+- Cross-axis capture (portrait preview vs landscape buffer) still has a corner-order risk in the pinned quad; the real app path is same-orientation preview/capture (verified), and it did not contribute to this bug. Do not change without a device case.
+
+### 12.5 Verification
+
+- New tests: `tests/camera/pinnedOverlayFallback.test.ts` (4: strict-only reproduces the wrong detector quad; default gives `overlayRects` + 0.8 within 5 px; bold markers stay at 0.5; direct `resolveOverlayRects` returns null at 0.5 and a 0.8 quad only with the fallback). `tests/workers/gradeDiagnostics.test.ts` (worker passthrough of `pinnedThresholdFactor`). Updated `tests/camera/captureDiagnostics.test.ts` for the rescue semantics. Full suite: **81 tests / 12 files**; `npm run check` 0 errors 0 warnings; production build succeeds (main 225.76 kB / 74.34 kB gzip, CSS 44.46 / 8.00).
+- Browser E2E on the production preview (fake 1080×965 canvas camera, 638×570 landscape viewport, page 210, four 140 markers centered in the guide rects at 16% of the box): live 4/4 through the 0.8 retry, auto capture fired with no control pressed, result 3/3 frames, and the result line showed the pinned scan at `p75×0.8` (first run, oversized markers) and the rescued detector quad at 0.5 px (second run, realistic markers). No console errors. The real iPhone capture with this build is still to be tested.
 

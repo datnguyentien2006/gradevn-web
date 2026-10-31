@@ -10,9 +10,12 @@
 
 import { expandFractionRect, Offset, Rect } from '../core/geometry';
 import {
+  FALLBACK_THRESHOLD_FACTOR,
   locateDarkBlobInRegionDetailed,
   type BlobScanDiagnostics
 } from '../core/markerBlobScan';
+
+export { FALLBACK_THRESHOLD_FACTOR };
 
 export interface LiveMarkerFrame {
   width: number;
@@ -28,13 +31,6 @@ export interface LiveMarkerBox {
   side: number;
   centroid: Offset | null;
 }
-
-/**
- * Ngưỡng quét lại cho ô trượt ngưỡng chuẩn p75×0.5. Mốc in trên màn hình
- * (iPhone quay màn hình laptop) thường xám ~140–150 trên nền ~210: ngưỡng
- * chuẩn ~105 bỏ qua, ngưỡng 0.8 ~168 nhận được.
- */
-export const FALLBACK_THRESHOLD_FACTOR = 0.8;
 
 export interface LiveMarkerScanOptions {
   /** Hệ số ngưỡng p75 (Dart: 0.5). Chế độ iOS dễ tính dùng 0.8. */

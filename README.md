@@ -21,16 +21,16 @@ dự án gốc `C:\Marker-td` được giữ nguyên, không sửa.
 Đã kiểm chứng trong phiên phát triển:
 
 - `npx tsc --noEmit`: sạch. `npm run check`: 0 lỗi, 0 cảnh báo.
-- `npm test`: 10 file, **76 test pass**, gồm hai fixture PNG khớp tuyệt đối với
+- `npm test`: 12 file, **81 test pass**, gồm hai fixture PNG khớp tuyệt đối với
   Dart (`standard40`: SBD 000413, mã đề 001, 9.25/10; `noisy40`: 000042, 007,
   9.75/10), 12 test quét mốc live port từ APK (kèm quét lại `p75×0.8` cho ô
-  trượt) và 17 test chẩn đoán capture
+  trượt) và 18 test chẩn đoán capture
   (cover mapping 390×844, xoay 0/90/180/270, lý do loại ô, stride RGBA,
-  cảnh báo quad ghim sai).
+  cảnh báo quad ghim sai, 4 test quad ghim quét lại `p75×0.8` khi mốc mờ).
 - E2E trên trình duyệt: tạo key → quét fixture → lưu phiếu → xem kết quả/stats →
   sửa SBD và chấm lại → reload vẫn còn dữ liệu → backup/restore → xuất XLSX.
-- Build production: JS chính **225.45 kB (74.27 kB gzip)**; XLSX tách chunk lazy
-  **427.62 kB**; worker 38.01 kB; CSS **44.46 kB (8.00 kB gzip)**; eruda
+- Build production: JS chính **225.76 kB (74.34 kB gzip)**; XLSX tách chunk lazy
+  **427.62 kB**; worker 38.29 kB; CSS **44.46 kB (8.00 kB gzip)**; eruda
   **506.26 kB**, chỉ tải khi mở `?debug=1`.
 - Lighthouse 11.7.1 (mobile emulation, đo trên bản preview production trước thay
   đổi quét mốc live): Performance **99**, Accessibility **100**, Best Practices
@@ -97,7 +97,7 @@ npm run preview
 ## Kiểm thử
 
 ```bash
-npm test          # 76 test
+npm test          # 81 test
 npm run check     # svelte-check
 npx tsc --noEmit  # type-check
 ```
@@ -204,8 +204,12 @@ Chi tiết đo được ở [`docs/WEB_PARITY.md`](docs/WEB_PARITY.md). Tóm t�
 - Hai fixture PNG cho kết quả trùng tuyệt đối; chưa có ảnh chụp thật từ iPhone
   để đo sai lệch màu/EXIF.
 - Quét mốc live port đúng từng ô của APK (80 ms, khung 640 px, cửa sổ 1.5×,
-  cùng ngưỡng); tự chụp khi cả 4 ô xanh 2 nhịp liên tiếp. Web vẫn chụp 3 khung
-  và bỏ phiếu đa số; Flutter chấm một khung. Đường chọn ảnh là một khung.
+  cùng ngưỡng); tự chụp khi cả 4 ô xanh 2 nhịp liên tiếp. Ô trượt ngưỡng
+  chuẩn `p75×0.5` được quét lại một lần ở `p75×0.8`; khi chụp, cả nhóm 4 ô
+  ghim cũng quét lại `p75×0.8` trước khi rơi xuống detector toàn trang (APK
+  không có hai bước quét lại này — xem `docs/IOS_LIVE_DETECTION.md` mục 11–12).
+  Web vẫn chụp 3 khung và bỏ phiếu đa số; Flutter chấm một khung. Đường chọn
+  ảnh là một khung.
 - HEIC phụ thuộc khả năng giải mã của Safari; không nhúng decoder WASM.
 - Các giới hạn logic của Flutter (chỉ TN40, không chấm E, OCR stub, `keyId`
   treo sau khi xoá khoá, mã đề mất số 0 đầu khi so khớp...) được giữ nguyên để

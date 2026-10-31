@@ -7,6 +7,12 @@
 
 import { clamp, Offset, Rect } from './geometry';
 
+/**
+ * Ngưỡng quét lại khi p75×0.5 bỏ sót mốc in mờ (màn hình ~140–150 trên nền
+ * ~210). Dùng chung cho quét live và 4 ô ghim lúc chụp.
+ */
+export const FALLBACK_THRESHOLD_FACTOR = 0.8;
+
 export interface MarkerLocate {
   /** Tâm khối pixel tối (= tâm mốc thật). */
   centroid: Offset;

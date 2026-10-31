@@ -18,7 +18,7 @@ Bản TS đọc PNG bằng `sharp`, chạy đúng các tầng đã port và so t
 | `standard40.png` | `000413` | `001` | 40 câu, trống câu 6 và 18 | 9.25 | 37 đúng | Khớp tuyệt đối |
 | `noisy40.png` | `000042` | `007` | 40 câu, không trống | 9.75 | 39 đúng | Khớp tuyệt đối |
 
-Các test liên quan (`npm test`, tổng 56 test):
+Các test liên quan (`npm test`, tổng 81 test / 12 file):
 
 - `tests/core/fixturePipeline.test.ts` — SBD, mã đề, toàn bộ dãy đáp án, `score`,
   `correctCount`, `partScores`; kiểm tra thêm kênh 0 cho cùng kết quả với luma.
@@ -31,6 +31,12 @@ Các test liên quan (`npm test`, tổng 56 test):
 - `tests/camera/liveMarkerScan.test.ts` — 9 test quét mốc từng ô: đủ 4 tâm,
   lệch khỏi ô gốc, mốc nhỏ/dẹt, ngưỡng tương phản p75×0.5, chuỗi toạ độ
   màn hình → khung dọc/ngang.
+- `tests/camera/pinnedOverlayFallback.test.ts` — 4 test quad ghim lúc chụp:
+  chỉ ngưỡng 0.5 tái hiện detector bắt vật tối ngoài giấy; mặc định quét lại
+  p75×0.8 cho quad khớp 4 mốc; mốc đậm giữ 0.5; `resolveOverlayRects` chỉ trả
+  quad ở 0.8 khi bật dự phòng.
+- `tests/workers/gradeDiagnostics.test.ts` — 1 test worker trả
+  `pinnedThresholdFactor` và quad ghim qua `GradeSuccessResponse`.
 - `tests/camera/vote.test.ts` — 5 test bỏ phiếu đa khung.
 - `tests/storage/stats.test.ts`, `tests/storage/xlsx.test.ts` — thống kê và cấu
   trúc workbook.
@@ -53,7 +59,13 @@ Không có sai lệch density nào làm đổi đáp án trên fixture.
    (`autoArmed` như APK), tránh vòng chụp lặp. Ô trượt ngưỡng chuẩn
    `p75×0.5` được quét lại một lần ở `p75×0.8` (giữ nguyên mọi luật blob)
    để nhận mốc xám in trên màn hình; kết quả ghi `usedFallback` /
-   `strictReason` trong chẩn đoán.
+   `strictReason` trong chẩn đoán. Khi chụp, 4 ô ghim cũng quét chuẩn
+   `p75×0.5` trước; nếu **cả nhóm** không ra quad thì quét lại cả nhóm ở
+   `p75×0.8` trước khi rơi xuống detector toàn trang — cùng lý do tương phản,
+   và là đường sửa lỗi “detector bắt vật tối ngoài giấy làm 2 góc dưới”
+   (`allowPinnedFallback`, mặc định bật; `pinnedThresholdFactor` ghi trong
+   chẩn đoán và dòng kết quả). APK không có bước quét lại này (Dart cố định
+   0.5), xem mục 12 của `IOS_LIVE_DETECTION.md`.
    Vẽ ô cũng theo APK: ô vuông trắng mờ 0.32 (0.55 khi đọc được), viền xanh
    `#2E7D32` dày 3, không số/không chấm (`src/camera/render.ts`).
    Khi chụp, web vẫn lấy 3 khung (`CAPTURE_FRAMES = 3`) rồi bỏ phiếu chữ ký
@@ -121,8 +133,11 @@ Muốn sửa cần quyết định của chủ dự án vì sẽ làm web khác 
     (`web_01.jpg`, phiếu hiển thị trên màn hình laptop): mốc xám trung bình
     133–147, nền trang 185–210 → ngưỡng ~93–105, mốc không xuống dưới ngưỡng
     nên cả 4 ô báo 0/4 dù mắt thấy mốc nằm trong ô. APK cũng báo 0/4 trên cùng
-    ảnh đó; in giấy đen thật thì qua. Không hạ ngưỡng vì sẽ đổi hành vi so với
-    Android và dễ nhận nhầm bóng/mép bàn thành mốc.
+    ảnh đó; in giấy đen thật thì qua. Web **không hạ ngưỡng mặc định**; thay
+    vào đó ô trượt được quét lại một lần ở `p75×0.8` (live) và cả nhóm 4 ô
+    ghim được quét lại ở `p75×0.8` khi chụp, có ghi chẩn đoán. Đây là khác
+    biệt có chủ đích so với APK, không sửa Dart; chi tiết ở mục 11–12 của
+    `IOS_LIVE_DETECTION.md`.
 
 ## 4. Chưa kiểm chứng được trong môi trường này
 
@@ -143,6 +158,11 @@ Muốn sửa cần quyết định của chủ dự án vì sẽ làm web khác 
   - mốc xám 146 trên nền 210: theo ngưỡng APK là 0/4; nay ô trượt tự quét
     lại `p75×0.8` nên xanh, kèm `usedFallback: true` (xem mục 11 của
     `IOS_LIVE_DETECTION.md`).
+  - ảnh giả toàn trang 210 với 4 mốc xám 140 đúng tâm ô (16% cạnh ô), khung
+    ngang 638×570: live 4/4 nhờ quét lại 0.8, tự chụp 3/3 khung; dòng kết quả
+    ghi “quét trong 4 ô ghim · ô ghim quét lại p75×0.8”, và round-trip có thể
+    thay bằng detector quad đạt kiểm chứng (0.5 px). Xem mục 12.5 của
+    `IOS_LIVE_DETECTION.md`.
   - tự chụp (4 mốc 70 px, không cần nút): vào màn kết quả "3/3 khung · đồng
     thuận 100%", 0 đúng / 0 sai / 40 trống (khung dựng chỉ có mốc); bấm "Chụp
     phiếu khác" về live "Giữ yên — sẵn sàng chụp", không tự chụp lặp.

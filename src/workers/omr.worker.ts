@@ -154,6 +154,7 @@ function handleGrade(request: GradeRequest): void {
             pinnedQuad: photo.diagnostics.pinnedQuad
               ? toQuadDto(photo.diagnostics.pinnedQuad)
               : null,
+            pinnedThresholdFactor: photo.diagnostics.pinnedThresholdFactor,
             detectorQuad: photo.diagnostics.detectorQuad
               ? toQuadDto(photo.diagnostics.detectorQuad)
               : null,

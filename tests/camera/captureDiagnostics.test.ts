@@ -389,17 +389,23 @@ describe('quad ghim sai không được im lặng', () => {
     );
     expect(photo).not.toBeNull();
     const diagnostics = photo!.diagnostics!;
-    expect(diagnostics.quadSource).toBe('overlayRects');
     expect(diagnostics.alignmentCheck).not.toBeNull();
     if (!diagnostics.rescuedQuad) {
       // Dart vẫn trả kết quả ở chế độ best-effort — nhưng UI phải cảnh báo.
+      expect(diagnostics.quadSource).toBe('overlayRects');
       expect(diagnostics.alignmentWarning).toBe(true);
       expect(photo!.quad.corners.map((corner) => corner.dx)).toEqual(
         diagnostics.pinnedQuad!.corners.map((corner) => corner.dx)
       );
     } else {
+      // Cứu bằng quad KHÁC (detector hoặc biến thể hướng còn lại của ô ghim).
       expect(diagnostics.alignmentCheck!.passed).toBe(true);
-      expect(diagnostics.quadSource).not.toBe('overlayRects');
+      const pinned = diagnostics.pinnedQuad!;
+      const moved = photo!.quad.corners.some((corner, index) => {
+        const before = pinned.corners[index];
+        return Math.hypot(corner.dx - before.dx, corner.dy - before.dy) > 2;
+      });
+      expect(moved).toBe(true);
     }
   });
 });
