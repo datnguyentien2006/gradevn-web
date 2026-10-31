@@ -71,13 +71,19 @@ export function drawFrame(canvas: HTMLCanvasElement, image: DecodedImage): void 
   ctx.putImageData(pixels, 0, 0);
 }
 
+export interface CapturedDebugOptions {
+  /** Tâm 4 ô ghim (tỉ lệ 0..1 khung) — vẽ chéo xanh lơ để đối chiếu. */
+  pinCenters?: { x: number; y: number }[];
+}
+
 /** Ảnh chụp + quad phát hiện + 4 ô ghim, thu về tối đa [maxWidth] px. */
 export function drawCapturedDebug(
   canvas: HTMLCanvasElement,
   image: DecodedImage,
   quad: QuadDto | null,
   rects: RectDto[],
-  maxWidth = 700
+  maxWidth = 700,
+  options: CapturedDebugOptions = {}
 ): void {
   const scale = Math.min(1, maxWidth / image.width);
   const width = Math.max(1, Math.round(image.width * scale));
@@ -104,6 +110,19 @@ export function drawCapturedDebug(
       (rect.right - rect.left) * width,
       (rect.bottom - rect.top) * height
     );
+  }
+
+  for (const center of options.pinCenters ?? []) {
+    const x = center.x * width;
+    const y = center.y * height;
+    ctx.strokeStyle = '#5fd7ee';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x - 7, y);
+    ctx.lineTo(x + 7, y);
+    ctx.moveTo(x, y - 7);
+    ctx.lineTo(x, y + 7);
+    ctx.stroke();
   }
 
   if (quad) {

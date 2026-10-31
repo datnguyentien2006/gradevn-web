@@ -45,6 +45,11 @@ export function captureVideoFrame(
   video: HTMLVideoElement,
   maxWidth = PREDECODE_MAX_WIDTH
 ): DecodedImage {
+  if (video.readyState < 2) {
+    throw new ImageDecodeError(
+      `Camera chưa sẵn sàng (readyState ${video.readyState} < 2).`
+    );
+  }
   const sourceWidth = video.videoWidth;
   const sourceHeight = video.videoHeight;
   if (!sourceWidth || !sourceHeight) {
@@ -55,7 +60,23 @@ export function captureVideoFrame(
   const height = Math.max(1, Math.round(sourceHeight * scale));
   const ctx = context(width, height);
   ctx.drawImage(video, 0, 0, width, height);
-  return { data: ctx.getImageData(0, 0, width, height).data, width, height };
+  const data = ctx.getImageData(0, 0, width, height).data;
+  const expected = width * height * 4;
+  if (data.length !== expected) {
+    throw new ImageDecodeError(
+      `Khung ảnh hỏng: ${width}×${height} cần ${expected} byte RGBA nhưng nhận ${data.length}.`
+    );
+  }
+  return { data, width, height };
+}
+
+/** Bản sao độc lập — buffer gốc sẽ bị transfer sang worker khi chấm. */
+export function cloneImage(image: DecodedImage): DecodedImage {
+  return {
+    data: new Uint8ClampedArray(image.data),
+    width: image.width,
+    height: image.height
+  };
 }
 
 /** Thu nhỏ ảnh đã decode (dùng cho ảnh debug + hậu kỳ). */

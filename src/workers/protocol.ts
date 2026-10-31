@@ -41,6 +41,10 @@ export interface ProbeRequest {
   image: ImageBufferDto;
   /** 4 ô ghim (tỉ lệ khung ảnh) — nơi kỳ vọng thấy 4 mốc góc. */
   rects: RectDto[];
+  /** Trả kèm số liệu + mask từng ô (màn chẩn đoán). */
+  diagnostics?: boolean;
+  /** Hệ số ngưỡng p75 — mặc định 0.5 (Dart); chế độ dễ tính dùng 0.8. */
+  thresholdFactor?: number;
 }
 
 export interface GradeRequest {
@@ -52,6 +56,10 @@ export interface GradeRequest {
   students: Student[];
   overlayRects: RectDto[] | null;
   frameSize: FrameSizeDto | null;
+  /** Tính quad/verify/homography cho chẩn đoán (không đổi cách chấm). */
+  diagnostics?: boolean;
+  /** Hệ số ngưỡng cho bước quét blob trong 4 ô ghim. */
+  thresholdFactor?: number;
 }
 
 export type WorkerRequest = ProbeRequest | GradeRequest;
@@ -63,10 +71,59 @@ export interface SquareProbeDto {
   side: number;
 }
 
+export interface RectPxDto {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export interface BlobCandidateDto {
+  bbox: RectPxDto;
+  centroid: PointDto;
+  side: number;
+  fill: number;
+  aspect: number;
+  areaRatio: number;
+  distance: number;
+  touchesRegionEdge: boolean;
+  accepted: boolean;
+  reason: string | null;
+}
+
+export interface BlobMaskDto {
+  data: ArrayBuffer;
+  width: number;
+  height: number;
+}
+
+export interface BlobDiagnosticsDto {
+  region: RectPxDto;
+  step: number;
+  pageLevel: number;
+  threshold: number;
+  thresholdFactor: number;
+  sampledPixels: number;
+  darkPixels: number;
+  componentCount: number;
+  rejectionCounts: Record<string, number>;
+  closest: BlobCandidateDto | null;
+  mask: BlobMaskDto | null;
+}
+
+export interface RectProbeDetailDto extends SquareProbeDto {
+  centroid: PointDto | null;
+  guidePx: RectPxDto;
+  scanPx: RectPxDto;
+  reason: string;
+  diagnostics: BlobDiagnosticsDto | null;
+}
+
 export interface ProbeResponse {
   type: 'probe-result';
   id: number;
   squares: SquareProbeDto[];
+  details: RectProbeDetailDto[] | null;
   totalMs: number;
 }
 
@@ -106,6 +163,27 @@ export interface WarpedDto {
   height: number;
 }
 
+export type QuadSourceDto = 'known' | 'overlayRects' | 'detector' | 'overlayQuad';
+
+export interface GradeDiagnosticsDto {
+  quadSource: QuadSourceDto;
+  quad: QuadDto;
+  pinnedQuad: QuadDto | null;
+  detectorQuad: QuadDto | null;
+  targetQuad: QuadDto;
+  /** Kiểm chứng round-trip tính cho chẩn đoán (kể cả nhánh ghim). */
+  alignmentCheck: VerificationDto | null;
+  alignmentWarning: boolean;
+  /** true khi quad ghim rớt kiểm chứng và đã thay bằng quad khác đạt. */
+  rescuedQuad: boolean;
+  homography: number[] | null;
+  pageScale: number;
+  src: { width: number; height: number; dataLength: number };
+  warped: { width: number; height: number };
+  verificationSkipped: boolean;
+  thresholdFactor: number;
+}
+
 export interface GradeResultDto {
   flags: (boolean | null)[];
   score: number;
@@ -122,6 +200,7 @@ export interface GradeSuccessResponse {
   quad: QuadDto;
   candidates: PointDto[];
   verification: VerificationDto | null;
+  diagnostics: GradeDiagnosticsDto | null;
   timing: TimingDto | null;
   warped: WarpedDto;
   result: GradeResultDto;

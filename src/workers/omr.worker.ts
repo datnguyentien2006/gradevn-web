@@ -5,17 +5,27 @@
 // lib/presentation/screens/scan_screen.dart (_analyzeMarkerFrameInIsolate).
 
 import { AlignmentQuad, Offset, Rect, Size } from '../core/geometry';
-import { scanLiveMarkerBoxes } from '../camera/liveMarkerScan';
+import {
+  scanLiveMarkerBoxesDetailed,
+  type LiveMarkerBoxDetail
+} from '../camera/liveMarkerScan';
+import type { BlobScanDiagnostics } from '../core/markerBlobScan';
 import { scanAndGrade } from '../core/scanFlow';
 import type {
+  BlobCandidateDto,
+  BlobDiagnosticsDto,
   GradeRequest,
   GradeResponse,
   GradeSuccessResponse,
+  ImageBufferDto,
   PointDto,
   ProbeRequest,
   ProbeResponse,
   QuadDto,
   RectDto,
+  RectProbeDetailDto,
+  RectPxDto,
+  VerificationDto,
   WorkerRequest,
   WorkerResponse
 } from './protocol';
@@ -44,24 +54,42 @@ function handleProbe(request: ProbeRequest): void {
   try {
     const width = request.image.width;
     const height = request.image.height;
+    assertImageBuffer(request.image);
     const rgba = new Uint8ClampedArray(request.image.data);
     const grayAt = rgbaLuma(rgba, width, height);
     const rects = request.rects.map(toRect);
+    const includeDiagnostics = request.diagnostics === true;
 
     // Đèn xanh từng ô = đúng phép quét đường chụp (port R8/R9/R11 của
     // scan_screen.dart), KHÔNG dùng detector toàn trang.
-    const boxes = scanLiveMarkerBoxes({ width, height, grayAt }, rects);
+    const detailed = scanLiveMarkerBoxesDetailed(
+      { width, height, grayAt },
+      rects,
+      {
+        thresholdFactor: request.thresholdFactor ?? 0.5,
+        includeDiagnostics
+      }
+    );
+    const transfer: Transferable[] = [];
+    const details = includeDiagnostics
+      ? detailed.map((detail) => {
+          const dto = toRectProbeDetailDto(detail);
+          if (dto.diagnostics?.mask) transfer.push(dto.diagnostics.mask.data);
+          return dto;
+        })
+      : null;
     const response: ProbeResponse = {
       type: 'probe-result',
       id: request.id,
-      squares: boxes.map((box) => ({
-        ok: box.ok,
-        fill: box.fill,
-        side: box.side
+      squares: detailed.map((detail) => ({
+        ok: detail.box.ok,
+        fill: detail.box.fill,
+        side: detail.box.side
       })),
+      details,
       totalMs: now() - started
     };
-    scope.postMessage(response);
+    scope.postMessage(response, transfer);
   } catch (error) {
     postError(request.id, error);
   }
@@ -72,6 +100,7 @@ function handleGrade(request: GradeRequest): void {
   try {
     const width = request.image.width;
     const height = request.image.height;
+    assertImageBuffer(request.image);
     const rgba = new Uint8ClampedArray(request.image.data);
     const graded = scanAndGrade({
       image: { data: rgba, width, height },
@@ -81,7 +110,9 @@ function handleGrade(request: GradeRequest): void {
       overlayRects: request.overlayRects ? request.overlayRects.map(toRect) : null,
       frameSize: request.frameSize
         ? new Size(request.frameSize.width, request.frameSize.height)
-        : undefined
+        : undefined,
+      diagnoseAlignment: request.diagnostics === true,
+      thresholdFactor: request.thresholdFactor ?? 0.5
     });
 
     if (graded == null) {
@@ -114,12 +145,36 @@ function handleGrade(request: GradeRequest): void {
       },
       quad: toQuadDto(photo.quad),
       candidates: (photo.detectedCandidates ?? []).map(toPoint),
-      verification: photo.verification
+      verification: photo.verification ? toVerificationDto(photo.verification) : null,
+      diagnostics: photo.diagnostics
         ? {
-            offsets: [...photo.verification.offsets],
-            tolerance: photo.verification.tolerance,
-            passed: photo.verification.passed,
-            maxOffset: photo.verification.maxOffset
+            quadSource: photo.diagnostics.quadSource,
+            quad: toQuadDto(photo.quad),
+            pinnedQuad: photo.diagnostics.pinnedQuad
+              ? toQuadDto(photo.diagnostics.pinnedQuad)
+              : null,
+            detectorQuad: photo.diagnostics.detectorQuad
+              ? toQuadDto(photo.diagnostics.detectorQuad)
+              : null,
+            targetQuad: toQuadDto(photo.diagnostics.targetQuad),
+            alignmentCheck: photo.diagnostics.alignmentCheck
+              ? toVerificationDto(photo.diagnostics.alignmentCheck)
+              : null,
+            alignmentWarning: photo.diagnostics.alignmentWarning,
+            rescuedQuad: photo.diagnostics.rescuedQuad,
+            homography: photo.diagnostics.homography,
+            pageScale: photo.diagnostics.pageScale,
+            src: {
+              width: photo.diagnostics.srcWidth,
+              height: photo.diagnostics.srcHeight,
+              dataLength: photo.diagnostics.srcDataLength
+            },
+            warped: {
+              width: photo.diagnostics.warpedWidth,
+              height: photo.diagnostics.warpedHeight
+            },
+            verificationSkipped: photo.diagnostics.verificationSkipped,
+            thresholdFactor: photo.diagnostics.thresholdFactor
           }
         : null,
       timing: photo.timing ? { ...photo.timing } : null,
@@ -199,6 +254,86 @@ function toQuadDto(quad: AlignmentQuad): QuadDto {
   };
 }
 
+function toVerificationDto(check: {
+  offsets: number[];
+  tolerance: number;
+  passed: boolean;
+  maxOffset: number;
+}): VerificationDto {
+  return {
+    offsets: [...check.offsets],
+    tolerance: check.tolerance,
+    passed: check.passed,
+    maxOffset: check.maxOffset
+  };
+}
+
+function toRectPxDto(rect: Rect): RectPxDto {
+  return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+}
+
+function toBlobDiagnosticsDto(diagnostics: BlobScanDiagnostics): BlobDiagnosticsDto {
+  let closest: BlobCandidateDto | null = null;
+  if (diagnostics.closest) {
+    const c = diagnostics.closest;
+    closest = {
+      bbox: c.bbox,
+      centroid: toPoint(c.centroid),
+      side: c.side,
+      fill: c.fill,
+      aspect: c.aspect,
+      areaRatio: c.areaRatio,
+      distance: c.distance,
+      touchesRegionEdge: c.touchesRegionEdge,
+      accepted: c.accepted,
+      reason: c.reason
+    };
+  }
+  return {
+    region: diagnostics.region,
+    step: diagnostics.step,
+    pageLevel: diagnostics.pageLevel,
+    threshold: diagnostics.threshold,
+    thresholdFactor: diagnostics.thresholdFactor,
+    sampledPixels: diagnostics.sampledPixels,
+    darkPixels: diagnostics.darkPixels,
+    componentCount: diagnostics.componentCount,
+    rejectionCounts: { ...diagnostics.rejectionCounts },
+    closest,
+    mask: diagnostics.mask
+      ? {
+          data: diagnostics.mask.data.buffer as ArrayBuffer,
+          width: diagnostics.mask.width,
+          height: diagnostics.mask.height
+        }
+      : null
+  };
+}
+
+function toRectProbeDetailDto(detail: LiveMarkerBoxDetail): RectProbeDetailDto {
+  return {
+    ok: detail.box.ok,
+    fill: detail.box.fill,
+    side: detail.box.side,
+    centroid: detail.box.centroid ? toPoint(detail.box.centroid) : null,
+    guidePx: toRectPxDto(detail.guidePx),
+    scanPx: toRectPxDto(detail.scanPx),
+    reason: detail.reason,
+    diagnostics: detail.diagnostics
+      ? toBlobDiagnosticsDto(detail.diagnostics)
+      : null
+  };
+}
+
 function now(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+function assertImageBuffer(image: ImageBufferDto): void {
+  const expected = image.width * image.height * 4;
+  if (image.data.byteLength !== expected) {
+    throw new Error(
+      `Khung ảnh hỏng: ${image.width}×${image.height} cần ${expected} byte RGBA nhưng nhận ${image.data.byteLength} byte.`
+    );
+  }
 }

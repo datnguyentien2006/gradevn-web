@@ -183,6 +183,10 @@ export interface ScanAndGradeParams extends Omit<GradeScanParams, 'chosen' | 'st
   overlayQuad?: AlignmentQuad | null;
   frameSize?: Size;
   knownQuad?: AlignmentQuad | null;
+  /** Tính verify/homography cho chẩn đoán; không đổi kết quả chấm. */
+  diagnoseAlignment?: boolean;
+  /** Hệ số ngưỡng quét blob trong ô ghim (mặc định 0.5 như Dart). */
+  thresholdFactor?: number;
 }
 
 /**
@@ -201,7 +205,9 @@ export function scanAndGrade({
   overlayRects,
   overlayQuad,
   frameSize,
-  knownQuad
+  knownQuad,
+  diagnoseAlignment,
+  thresholdFactor
 }: ScanAndGradeParams): GradedScan | null {
   const photo = new OmrScanService().scanPhoto(image, {
     spec: contestSheetSpec(contest),
@@ -212,7 +218,9 @@ export function scanAndGrade({
     knownQuad,
     skipVerification: false,
     // R19b — LUÔN BEST-EFFORT: verify không chặn kết quả.
-    requireVerifiedWarp: false
+    requireVerifiedWarp: false,
+    diagnoseAlignment,
+    thresholdFactor
   });
   if (photo == null) return null;
   return gradeScan({

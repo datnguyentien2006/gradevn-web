@@ -2,9 +2,11 @@
   import { onMount, tick } from 'svelte';
   import type {
     DensityGridsDto,
+    GradeDiagnosticsDto,
     GradeSuccessResponse,
+    QuadDto,
     RectDto,
-    SquareProbeDto
+    RectProbeDetailDto
   } from '../workers/protocol';
   import { omrWorker } from '../workers/omrClient';
   import { OmrDecoder } from '../core/omrDecoder';
@@ -25,16 +27,25 @@
   } from './camera';
   import {
     captureVideoFrame,
+    cloneImage,
     decodeImageFile,
     downscaleImage,
     PROBE_MAX_WIDTH,
     type DecodedImage
   } from './imageInput';
   import {
+    coverMapping,
     guideGeometry,
     overlayRectsForFrame,
     type Area
   } from './overlayGeometry';
+  import {
+    jsonBlob,
+    rgbaToPng,
+    shareDiagnosticFiles,
+    timestampSlug,
+    type DiagnosticFile
+  } from './diagnostics';
   import {
     buildPracticeSession,
     loadPracticeSettings,
@@ -69,6 +80,60 @@
   const CAPTURE_FRAMES = 3;
   const AUTO_CAPTURE_STREAK = 2;
   const PROBE_INTERVAL_MS = 80;
+  const TOLERANT_KEY = 'gradevn.scan.tolerant.v1';
+  /** p75 × hệ số này thay cho ×0.5 của Dart khi bật chế độ iOS dễ tính. */
+  const TOLERANT_THRESHOLD_FACTOR = 0.8;
+
+  interface LiveTickSummary {
+    at: string;
+    ms: number;
+    frame: string;
+    readyState: number;
+    currentTime: number;
+    lights: string;
+    reasons: string[];
+  }
+
+  interface FrameDiagnosticInfo {
+    readyState: number;
+    currentTime: number;
+    videoWidth: number;
+    videoHeight: number;
+    displayWidth: number;
+    displayHeight: number;
+    dpr: number;
+    orientation: string;
+  }
+
+  interface CaptureFrameInfo {
+    width: number;
+    height: number;
+    byteLength: number;
+    readyState: number;
+    currentTime: number;
+  }
+
+  interface CaptureContext {
+    trigger: 'auto' | 'manual';
+    startedAt: string;
+    videoWidth: number;
+    videoHeight: number;
+    areaWidth: number;
+    areaHeight: number;
+    mappingScale: number;
+    mappingOffsetX: number;
+    mappingOffsetY: number;
+    guideCenters: { x: number; y: number }[];
+    overlayRects: (RectDto & { centerX: number; centerY: number })[];
+    frames: CaptureFrameInfo[];
+    thresholdFactor: number;
+  }
+
+  interface CaptureDiagnosticBundle {
+    context: CaptureContext;
+    frameDiagnostics: (GradeDiagnosticsDto | null)[];
+    chosenIndex: number;
+  }
 
   let { contestId = null }: { contestId?: number | null } = $props();
 
@@ -102,11 +167,17 @@
   let ready = $derived(loadState === 'practice' || loadState === 'ready');
 
   let lights = $state<boolean[]>([false, false, false, false]);
-  let probeSquares = $state.raw<SquareProbeDto[]>([]);
   let greenStreak = $state(0);
   let probeMs = $state(0);
   let probeCount = $state(0);
   let probeError = $state<string | null>(null);
+  let probeStatus = $state<'idle' | 'alive' | 'error'>('idle');
+  let liveDetails = $state.raw<RectProbeDetailDto[]>([]);
+  let liveTicks = $state.raw<LiveTickSummary[]>([]);
+  let liveTicksPerSec = $state(0);
+  let frameInfo = $state.raw<FrameDiagnosticInfo | null>(null);
+  let tolerantMode = $state(loadTolerantMode());
+  let diagExporting = $state(false);
   let trackInfo = $state<TrackDescription | null>(null);
 
   let result = $state.raw<GradeSuccessResponse | null>(null);
@@ -119,6 +190,11 @@
   let debugFrame = $state.raw<DecodedImage | null>(null);
   let debugThreshold = $state.raw<ThresholdPreview | null>(null);
   let capturedRects = $state.raw<RectDto[]>([]);
+  let rawCapture = $state.raw<DecodedImage | null>(null);
+  let captureDiagnostics = $state.raw<CaptureDiagnosticBundle | null>(null);
+  let showPinCenters = $state(true);
+  let rectCanvases = $state<HTMLCanvasElement[]>([]);
+  let lastTickTimes: number[] = [];
 
   let showSettings = $state(false);
   let showDebugPanel = $state(false);
@@ -211,6 +287,11 @@
         `Chỉ đọc được ${framesGraded}/${framesCaptured} khung hình.`
       );
     }
+    if (graded.diagnostics?.alignmentWarning) {
+      list.push(
+        'Phiếu có thể chưa được nắn đúng (mốc góc lệch sau khi nắn) — nên chụp lại.'
+      );
+    }
     return list;
   });
 
@@ -248,11 +329,389 @@
     return lines.join('\n');
   });
 
+  let captureDebugText = $derived.by(() => {
+    const diagnostics = result?.diagnostics ?? null;
+    if (!diagnostics) {
+      return 'Chẩn đoán nắn phẳng: không có (worker không trả diagnostics).';
+    }
+    const lines: string[] = [];
+    lines.push(
+      `Nguồn quad: ${quadSourceLabel(diagnostics.quadSource)}${
+        diagnostics.rescuedQuad ? ' (đã thay bằng quad khác đạt kiểm chứng)' : ''
+      }`
+    );
+    lines.push(`Quad dùng: ${quadLine(diagnostics.quad)}`);
+    lines.push(`Quad ghim: ${quadLine(diagnostics.pinnedQuad)}`);
+    lines.push(`Quad detector: ${quadLine(diagnostics.detectorQuad)}`);
+    lines.push(`Quad đích: ${quadLine(diagnostics.targetQuad)}`);
+    const check = diagnostics.alignmentCheck;
+    if (check) {
+      lines.push(
+        `Kiểm chứng: ${check.passed ? 'ĐẠT' : 'KHÔNG ĐẠT'} · lệch ${check.maxOffset.toFixed(
+          1
+        )}/${check.tolerance.toFixed(1)} px · [${check.offsets
+          .map((offset) => offset.toFixed(1))
+          .join(', ')}]`
+      );
+    } else {
+      lines.push('Kiểm chứng: chưa tính');
+    }
+    lines.push(
+      `Nguồn ${diagnostics.src.width}×${diagnostics.src.height} (${diagnostics.src.dataLength} byte) → nắn ${diagnostics.warped.width}×${diagnostics.warped.height} · pageScale ${diagnostics.pageScale.toFixed(
+        3
+      )}`
+    );
+    if (diagnostics.homography) {
+      lines.push(
+        `H: ${diagnostics.homography.map((value) => value.toFixed(4)).join(' ')}`
+      );
+    }
+    lines.push(
+      `Ngưỡng p75×${diagnostics.thresholdFactor} · verify ${
+        diagnostics.verificationSkipped ? 'bỏ qua (quad ghim)' : 'đã chạy'
+      }`
+    );
+    return lines.join('\n');
+  });
+
   function readArea(): Area {
     return {
       width: Math.max(1, window.innerWidth),
       height: Math.max(1, window.innerHeight)
     };
+  }
+
+  function loadTolerantMode(): boolean {
+    try {
+      return localStorage.getItem(TOLERANT_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function thresholdFactor(): number {
+    return tolerantMode ? TOLERANT_THRESHOLD_FACTOR : 0.5;
+  }
+
+  function toggleTolerant(): void {
+    tolerantMode = !tolerantMode;
+    try {
+      localStorage.setItem(TOLERANT_KEY, tolerantMode ? '1' : '0');
+    } catch {
+      // Safari riêng tư có thể chặn localStorage.
+    }
+    showToast(
+      tolerantMode
+        ? 'Đã bật chế độ iOS dễ tính — chỉ dùng để so sánh.'
+        : 'Đã tắt chế độ iOS dễ tính — quay về ngưỡng APK.'
+    );
+  }
+
+  function frameSnapshot(element: HTMLVideoElement): FrameDiagnosticInfo {
+    return {
+      readyState: element.readyState,
+      currentTime: element.currentTime,
+      videoWidth: element.videoWidth,
+      videoHeight: element.videoHeight,
+      displayWidth: area.width,
+      displayHeight: area.height,
+      dpr: window.devicePixelRatio || 1,
+      orientation:
+        (screen.orientation && screen.orientation.type) ||
+        (window.innerWidth >= window.innerHeight ? 'landscape' : 'portrait')
+    };
+  }
+
+  function normalizedQuad(quad: QuadDto, width: number, height: number): QuadDto {
+    const norm = (point: { x: number; y: number }) => ({
+      x: point.x / width,
+      y: point.y / height
+    });
+    return { tl: norm(quad.tl), tr: norm(quad.tr), br: norm(quad.br), bl: norm(quad.bl) };
+  }
+
+  function quadSourceLabel(source: string | undefined): string {
+    switch (source) {
+      case 'overlayRects':
+        return 'quét trong 4 ô ghim';
+      case 'detector':
+        return 'detector toàn trang';
+      case 'overlayQuad':
+        return 'quad ghim (overlayQuad)';
+      case 'known':
+        return 'quad đã biết';
+      default:
+        return '—';
+    }
+  }
+
+  function quadLine(quad: QuadDto | null | undefined): string {
+    if (!quad) return '—';
+    const pair = (point: { x: number; y: number }) =>
+      `(${point.x.toFixed(0)},${point.y.toFixed(0)})`;
+    return `tl${pair(quad.tl)} tr${pair(quad.tr)} br${pair(quad.br)} bl${pair(quad.bl)}`;
+  }
+
+  function trackSettings(): Record<string, unknown> | null {
+    const track = stream?.getVideoTracks?.()[0];
+    if (!track) return null;
+    try {
+      return { ...track.getSettings() };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Vẽ mask ngưỡng của 1 ROI (RGBA từ worker) vào canvas nhỏ trong panel. */
+  function drawMask(
+    canvas: HTMLCanvasElement,
+    mask: { data: ArrayBuffer; width: number; height: number }
+  ): void {
+    const expected = mask.width * mask.height * 4;
+    if (mask.data.byteLength !== expected) {
+      throw new Error(
+        `Mask hỏng: ${mask.width}×${mask.height} cần ${expected} byte nhưng có ${mask.data.byteLength}.`
+      );
+    }
+    canvas.width = mask.width;
+    canvas.height = mask.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.putImageData(
+      new ImageData(new Uint8ClampedArray(mask.data), mask.width, mask.height),
+      0,
+      0
+    );
+  }
+
+  function rectCenter(rect: RectDto): { x: number; y: number } {
+    return {
+      x: (rect.left + rect.right) / 2,
+      y: (rect.top + rect.bottom) / 2
+    };
+  }
+
+  function liveDiagnosticPayload(): Record<string, unknown> {
+    const element = video;
+    const frameNow: Area | null =
+      element && element.videoWidth
+        ? { width: element.videoWidth, height: element.videoHeight }
+        : null;
+    const mapping = frameNow ? coverMapping(frameNow, area) : null;
+    return {
+      kind: 'live',
+      exportedAt: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      debugFlag: DEBUG,
+      tolerantMode,
+      thresholdFactor: thresholdFactor(),
+      probe: {
+        status: probeStatus,
+        error: probeError,
+        lastMs: Math.round(probeMs),
+        count: probeCount,
+        ticksPerSec: Number(liveTicksPerSec.toFixed(2))
+      },
+      track: trackInfo,
+      trackSettings: trackSettings(),
+      frame: frameInfo,
+      area,
+      dpr: window.devicePixelRatio || 1,
+      orientation:
+        (screen.orientation && screen.orientation.type) ||
+        (window.innerWidth >= window.innerHeight ? 'landscape' : 'portrait'),
+      coverMapping: mapping
+        ? {
+            scale: mapping.scale,
+            offsetX: mapping.offsetX,
+            offsetY: mapping.offsetY
+          }
+        : null,
+      guide: guideGeometry(area),
+      overlayRects: frameNow
+        ? overlayRectsForFrame(area, frameNow).rects.map((rect) => ({
+            ...rect,
+            center: rectCenter(rect)
+          }))
+        : null,
+      squares: liveDetails.map((detail) => ({
+        ok: detail.ok,
+        reason: detail.reason,
+        centroid: detail.centroid,
+        guidePx: detail.guidePx,
+        scanPx: detail.scanPx,
+        diagnostics: detail.diagnostics
+          ? {
+              region: detail.diagnostics.region,
+              step: detail.diagnostics.step,
+              pageLevel: detail.diagnostics.pageLevel,
+              threshold: detail.diagnostics.threshold,
+              thresholdFactor: detail.diagnostics.thresholdFactor,
+              sampledPixels: detail.diagnostics.sampledPixels,
+              darkPixels: detail.diagnostics.darkPixels,
+              componentCount: detail.diagnostics.componentCount,
+              rejectionCounts: detail.diagnostics.rejectionCounts,
+              closest: detail.diagnostics.closest,
+              maskSize: detail.diagnostics.mask
+                ? {
+                    width: detail.diagnostics.mask.width,
+                    height: detail.diagnostics.mask.height,
+                    byteLength: detail.diagnostics.mask.data.byteLength
+                  }
+                : null
+            }
+          : null
+      })),
+      history: liveTicks
+    };
+  }
+
+  function captureDiagnosticPayload(): Record<string, unknown> | null {
+    const bundle = captureDiagnostics;
+    if (!bundle) return null;
+    const graded = result;
+    const diagnostics = graded?.diagnostics ?? null;
+    const usedRaw = rawCapture;
+    return {
+      kind: 'capture',
+      exportedAt: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      track: trackInfo,
+      trackSettings: trackSettings(),
+      dpr: window.devicePixelRatio || 1,
+      frameInfo,
+      context: bundle.context,
+      chosenIndex: bundle.chosenIndex,
+      frameDiagnostics: bundle.frameDiagnostics,
+      rawFrame: usedRaw
+        ? {
+            width: usedRaw.width,
+            height: usedRaw.height,
+            byteLength: usedRaw.data.byteLength
+          }
+        : null,
+      quadSource: diagnostics?.quadSource ?? null,
+      quadSourceLabel: quadSourceLabel(diagnostics?.quadSource),
+      quadUsed: graded?.quad ?? null,
+      pinnedQuad: diagnostics?.pinnedQuad ?? null,
+      detectorQuad: diagnostics?.detectorQuad ?? null,
+      targetQuad: diagnostics?.targetQuad ?? null,
+      homography: diagnostics?.homography ?? null,
+      pageScale: diagnostics?.pageScale ?? null,
+      alignmentCheck: diagnostics?.alignmentCheck ?? null,
+      alignmentWarning: diagnostics?.alignmentWarning ?? null,
+      rescuedQuad: diagnostics?.rescuedQuad ?? null,
+      verificationSkipped: diagnostics?.verificationSkipped ?? null,
+      verification: graded?.verification ?? null,
+      thresholdFactor: diagnostics?.thresholdFactor ?? bundle.context.thresholdFactor,
+      warped: graded
+        ? { width: graded.warped.width, height: graded.warped.height }
+        : null,
+      scan: graded
+        ? {
+            studentCodeRaw: graded.scan.studentCodeRaw,
+            examCodeRaw: graded.scan.examCodeRaw,
+            answers: graded.scan.answers,
+            graded: graded.graded,
+            score: graded.result.score
+          }
+        : null
+    };
+  }
+
+  async function exportLiveDiagnostics(): Promise<void> {
+    if (diagExporting) return;
+    diagExporting = true;
+    try {
+      const files: DiagnosticFile[] = [];
+      const slug = timestampSlug();
+      const element = video;
+      if (element && element.videoWidth && element.readyState >= 2) {
+        try {
+          const frame = captureVideoFrame(element, LIVE_CAPTURE_MAX_WIDTH);
+          files.push({
+            name: `live-${slug}-frame.png`,
+            blob: await rgbaToPng(frame.data, frame.width, frame.height)
+          });
+        } catch (error) {
+          showToast(`Không chụp được khung hiện tại: ${messageOf(error)}`);
+        }
+      }
+      for (let index = 0; index < liveDetails.length; index++) {
+        const mask = liveDetails[index]?.diagnostics?.mask;
+        if (!mask) continue;
+        files.push({
+          name: `live-${slug}-roi-${index + 1}.png`,
+          blob: await rgbaToPng(mask.data, mask.width, mask.height, 160)
+        });
+      }
+      files.push({
+        name: `live-${slug}.json`,
+        blob: jsonBlob(liveDiagnosticPayload())
+      });
+      await shareOutcome(files, 'Chẩn đoán quét live');
+    } catch (error) {
+      showToast(`Không tạo được gói chẩn đoán: ${messageOf(error)}`);
+    } finally {
+      diagExporting = false;
+    }
+  }
+
+  async function exportCaptureDiagnostics(): Promise<void> {
+    if (diagExporting) return;
+    if (!captureDiagnostics) {
+      showToast('Chưa có lần chụp nào để xuất.');
+      return;
+    }
+    diagExporting = true;
+    try {
+      const files: DiagnosticFile[] = [];
+      const slug = timestampSlug();
+      if (rawCapture && rawCapture.data.byteLength > 0) {
+        files.push({
+          name: `capture-${slug}-raw.png`,
+          blob: await rgbaToPng(
+            rawCapture.data,
+            rawCapture.width,
+            rawCapture.height
+          )
+        });
+      }
+      if (result) {
+        files.push({
+          name: `capture-${slug}-warped.png`,
+          blob: await warpedPngBlob(result.warped)
+        });
+      }
+      files.push({
+        name: `capture-${slug}.json`,
+        blob: jsonBlob(captureDiagnosticPayload() ?? {})
+      });
+      await shareOutcome(files, 'Chẩn đoán lần chụp');
+    } catch (error) {
+      showToast(`Không tạo được gói chẩn đoán: ${messageOf(error)}`);
+    } finally {
+      diagExporting = false;
+    }
+  }
+
+  async function shareOutcome(files: DiagnosticFile[], title: string): Promise<void> {
+    const outcome = await shareDiagnosticFiles(
+      files,
+      title,
+      'Gói chẩn đoán GradeVN — gửi kèm cho kỹ thuật.'
+    );
+    if (outcome.shared) {
+      showToast('Đã mở bảng chia sẻ — chọn ứng dụng để gửi.');
+    } else if (outcome.downloaded) {
+      showToast(`Đã tải ${files.length} tệp chẩn đoán vào Tệp/Downloads.`);
+    } else if (outcome.error === 'abort') {
+      showToast('Đã huỷ chia sẻ.');
+    } else if (outcome.error) {
+      showToast(`Không chia sẻ được: ${outcome.error}`);
+    }
   }
 
   function messageOf(error: unknown): string {
@@ -410,7 +869,6 @@
     if (video) video.srcObject = null;
     void wakeKeeper.release();
     lights = [false, false, false, false];
-    probeSquares = [];
     greenStreak = 0;
   }
 
@@ -426,6 +884,7 @@
     if (mode !== 'live' || !stream) return;
     const element = video;
     if (!element || element.readyState < 2 || !element.videoWidth) {
+      if (element) frameInfo = frameSnapshot(element);
       scheduleProbe(220);
       return;
     }
@@ -442,20 +901,55 @@
       };
       const overlay = overlayRectsForFrame(area, frameNow);
       const image = captureVideoFrame(element, PROBE_MAX_WIDTH);
-      const response = await omrWorker.probe(image, overlay.rects);
+      frameInfo = frameSnapshot(element);
+      const response = await omrWorker.probe(image, overlay.rects, {
+        diagnostics: DEBUG,
+        thresholdFactor: thresholdFactor()
+      });
       if (mode !== 'live' || !stream) return;
       lights = response.squares.map((square) => square.ok);
-      probeSquares = response.squares;
+      liveDetails = response.details ?? [];
       probeMs = performance.now() - startedAt;
       probeCount += 1;
+      probeStatus = 'alive';
       probeError = null;
+      recordTick(startedAt, response.details, null);
       applyGreenLights();
     } catch (error) {
+      probeStatus = 'error';
       probeError = messageOf(error);
+      liveDetails = [];
+      recordTick(startedAt, null, probeError);
     } finally {
       probeBusy = false;
       if (mode === 'live' && stream) scheduleProbe();
     }
+  }
+
+  function recordTick(
+    startedAt: number,
+    details: RectProbeDetailDto[] | null,
+    error: string | null
+  ): void {
+    const at = performance.now();
+    lastTickTimes.push(at);
+    while (lastTickTimes.length > 0 && at - lastTickTimes[0] > 3000) {
+      lastTickTimes.shift();
+    }
+    liveTicksPerSec = lastTickTimes.length / 3;
+    const info = frameInfo;
+    const summary: LiveTickSummary = {
+      at: new Date().toISOString(),
+      ms: Math.round(performance.now() - startedAt),
+      frame: info ? `${info.videoWidth}×${info.videoHeight}` : '—',
+      readyState: info?.readyState ?? 0,
+      currentTime: info ? Number(info.currentTime.toFixed(3)) : 0,
+      lights: lights.map((lit) => (lit ? '1' : '0')).join(''),
+      reasons: error
+        ? [`ERROR: ${error}`]
+        : (details ?? []).map((detail) => detail.reason)
+    };
+    liveTicks = [summary, ...liveTicks].slice(0, 50);
   }
 
   /** Tự chụp y hệt APK: cả 4 ô xanh 2 nhịp liên tiếp (~160 ms ở 80 ms/nhịp). */
@@ -477,17 +971,19 @@
     ) {
       autoArmed = false;
       playTone('ready');
-      void captureAndGradeFromCamera();
+      void captureAndGradeFromCamera('auto');
     }
   }
 
   function manualCapture(): void {
     unlockAudio();
     if (!ready || mode !== 'live' || !stream || busy) return;
-    void captureAndGradeFromCamera();
+    void captureAndGradeFromCamera('manual');
   }
 
-  async function captureAndGradeFromCamera(): Promise<void> {
+  async function captureAndGradeFromCamera(
+    trigger: 'auto' | 'manual'
+  ): Promise<void> {
     const element = video;
     if (mode !== 'live' || !stream || !element || busy) return;
     if (!element.videoWidth) {
@@ -501,11 +997,16 @@
     autoArmed = false;
     greenStreak = 0;
     lights = [false, false, false, false];
-    probeSquares = [];
     scanError = null;
     statusOverride = 'Đang chụp…';
     result = null;
     duplicateWarning = false;
+    rawCapture = null;
+    captureDiagnostics = null;
+    liveDetails = [];
+    lastTickTimes = [];
+    liveTicks = [];
+    liveTicksPerSec = 0;
     await tick();
 
     const frames: DecodedImage[] = [];
@@ -516,13 +1017,50 @@
         width: element.videoWidth,
         height: element.videoHeight
       };
+      const mapping = coverMapping(frameNow, area);
+      const guideCenters = guideGeometry(area).centers.map((center) => ({
+        x: center.x,
+        y: center.y
+      }));
       const overlay = overlayRectsForFrame(area, frameNow);
       overlayRects = overlay.rects;
       frameSize = frameNow;
+      const context: CaptureContext = {
+        trigger,
+        startedAt: new Date().toISOString(),
+        videoWidth: frameNow.width,
+        videoHeight: frameNow.height,
+        areaWidth: area.width,
+        areaHeight: area.height,
+        mappingScale: mapping.scale,
+        mappingOffsetX: mapping.offsetX,
+        mappingOffsetY: mapping.offsetY,
+        guideCenters,
+        overlayRects: overlayRects.map((rect) => ({
+          ...rect,
+          centerX: (rect.left + rect.right) / 2,
+          centerY: (rect.top + rect.bottom) / 2
+        })),
+        frames: [],
+        thresholdFactor: thresholdFactor()
+      };
+      captureDiagnostics = { context, frameDiagnostics: [], chosenIndex: -1 };
       for (let index = 0; index < CAPTURE_FRAMES; index++) {
+        const readyState = element.readyState;
+        const currentTime = Number(element.currentTime.toFixed(3));
         const captured = captureVideoFrame(element, LIVE_CAPTURE_MAX_WIDTH);
+        context.frames.push({
+          width: captured.width,
+          height: captured.height,
+          byteLength: captured.data.byteLength,
+          readyState,
+          currentTime
+        });
         if (index === 0) {
-          const display = downscaleImage(captured, 900);
+          // Bản sao: buffer của `captured` bị transfer sang worker khi chấm.
+          const snapshot = cloneImage(captured);
+          rawCapture = snapshot;
+          const display = downscaleImage(snapshot, 900);
           debugFrame = display;
           try {
             debugThreshold = buildThresholdPreview(
@@ -575,7 +1113,9 @@
           keys,
           students,
           overlayRects,
-          frameSize
+          frameSize,
+          diagnostics: true,
+          thresholdFactor: thresholdFactor()
         });
         if (response) graded.push(response);
       }
@@ -601,6 +1141,14 @@
     result = chosen;
     agreement = voted.agreement;
     framesGraded = graded.length;
+    const chosenIndex = graded.indexOf(chosen);
+    if (captureDiagnostics) {
+      captureDiagnostics = {
+        ...captureDiagnostics,
+        frameDiagnostics: graded.map((frame) => frame.diagnostics ?? null),
+        chosenIndex
+      };
+    }
     mode = 'result';
     busy = false;
     statusOverride = null;
@@ -644,12 +1192,16 @@
     statusOverride = 'Đang đọc ảnh…';
     scanError = null;
     result = null;
+    rawCapture = null;
+    captureDiagnostics = null;
     stopStreamOnly();
     await tick();
 
     try {
       const decoded = await decodeImageFile(file, FILE_MAX_WIDTH);
-      const display = downscaleImage(decoded, 900);
+      const snapshot = cloneImage(decoded);
+      rawCapture = snapshot;
+      const display = downscaleImage(snapshot, 900);
       debugFrame = display;
       try {
         debugThreshold = buildThresholdPreview(
@@ -674,6 +1226,15 @@
     debugFrame = null;
     debugThreshold = null;
     capturedRects = [];
+    rawCapture = null;
+    captureDiagnostics = null;
+    liveDetails = [];
+    liveTicks = [];
+    liveTicksPerSec = 0;
+    lastTickTimes = [];
+    frameInfo = null;
+    probeStatus = 'idle';
+    probeError = null;
     agreement = 0;
     framesGraded = 0;
     framesCaptured = 0;
@@ -780,13 +1341,25 @@
     }
     if (!DEBUG) return;
     const captured = capturedCanvas;
-    if (captured && debugFrame) {
+    const debugImage = rawCapture ?? debugFrame;
+    if (captured && debugImage) {
       try {
         drawCapturedDebug(
           captured,
-          debugFrame,
-          result.quad,
-          capturedRects
+          debugImage,
+          result.quad
+            ? normalizedQuad(result.quad, debugImage.width, debugImage.height)
+            : null,
+          capturedRects,
+          700,
+          {
+            pinCenters: showPinCenters
+              ? (captureDiagnostics?.context.overlayRects ?? []).map((rect) => ({
+                  x: rect.centerX,
+                  y: rect.centerY
+                }))
+              : []
+          }
         );
       } catch {
         // bỏ qua
@@ -798,6 +1371,22 @@
         drawThresholdPreview(threshold, debugThreshold);
       } catch {
         // bỏ qua
+      }
+    }
+  });
+
+  $effect(() => {
+    if (!showDebugPanel) return;
+    const details = liveDetails;
+    if (!details.length) return;
+    for (let index = 0; index < details.length; index++) {
+      const mask = details[index]?.diagnostics?.mask;
+      const canvas = rectCanvases[index];
+      if (!mask || !canvas) continue;
+      try {
+        drawMask(canvas, mask);
+      } catch (error) {
+        probeError = messageOf(error);
       }
     }
   });
@@ -974,21 +1563,60 @@
 
     <section class="card warped-card">
       <h3>Ảnh phiếu đã nắn phẳng</h3>
+      {#if result.diagnostics?.alignmentWarning}
+        <p class="align-warn" role="alert">
+          Phiếu có thể chưa được nắn đúng — nên chụp lại.
+        </p>
+      {/if}
       <canvas bind:this={warpedCanvas} class="warped-canvas"></canvas>
       <p class="muted small">Ô đỏ = mật độ mực cao (được chọn).</p>
+      {#if result.diagnostics}
+        <p class="muted small">
+          Mốc dùng để nắn: {quadSourceLabel(result.diagnostics.quadSource)}
+          {#if result.diagnostics.alignmentCheck}
+            · kiểm chứng lệch
+            {result.diagnostics.alignmentCheck.maxOffset.toFixed(1)} px
+          {/if}
+          {#if result.diagnostics.rescuedQuad}
+            · đã thay bằng quad đạt kiểm chứng
+          {/if}
+        </p>
+      {/if}
     </section>
 
     {#if DEBUG}
       <section class="card debug">
         <h3>Gỡ lỗi</h3>
         <pre class="debug-pre selectable">{debugText}</pre>
-        {#if debugFrame}
-          <h4>Ảnh chụp + 4 mốc + 4 ô ghim</h4>
+        {#if captureDiagnostics}
+          <h4>Nắn phẳng: quad · kiểm chứng · homography</h4>
+          <pre class="debug-pre selectable">{captureDebugText}</pre>
+        {/if}
+        {#if rawCapture ?? debugFrame}
+          <h4>Ảnh chụp · xanh = mốc dùng nắn · vàng = 4 ô ghim · xanh lơ = tâm ô ghim</h4>
           <canvas bind:this={capturedCanvas} class="debug-canvas"></canvas>
+          {#if captureDiagnostics}
+            <label class="switch-row diag-toggle">
+              <span>
+                <b>Hiện tâm 4 ô ghim</b>
+                <small class="muted">Chéo xanh lơ trên ảnh chụp</small>
+              </span>
+              <input type="checkbox" bind:checked={showPinCenters} />
+            </label>
+          {/if}
         {/if}
         {#if debugThreshold}
           <h4>Ngưỡng thích nghi (mô phỏng hiển thị)</h4>
           <canvas bind:this={thresholdCanvas} class="debug-canvas"></canvas>
+        {/if}
+        {#if captureDiagnostics}
+          <button
+            class="btn"
+            onclick={exportCaptureDiagnostics}
+            disabled={diagExporting}
+          >
+            {diagExporting ? 'Đang tạo…' : 'Lưu dữ liệu chẩn đoán lần chụp'}
+          </button>
         {/if}
       </section>
     {/if}
@@ -1091,6 +1719,11 @@
       <div class="banner" role="alert">
         <span>{scanError}</span>
         <button onclick={() => (scanError = null)} aria-label="Đóng">×</button>
+      </div>
+    {:else if probeStatus === 'error' && probeError}
+      <div class="banner" role="alert">
+        <span>Lỗi quét mốc: {probeError}</span>
+        <button onclick={() => (probeError = null)} aria-label="Đóng">×</button>
       </div>
     {/if}
 
@@ -1264,27 +1897,142 @@
           if (event.target === event.currentTarget) showDebugPanel = false;
         }}
       >
-        <dialog open class="sheet" aria-label="Bảng gỡ lỗi">
+        <dialog open class="sheet" aria-label="Bảng chẩn đoán">
           <header class="sheet-head">
-            <h2>Gỡ lỗi trực tiếp</h2>
-            <button class="link-btn" onclick={() => (showDebugPanel = false)}>Đóng</button>
+            <div>
+              <h2>Chẩn đoán trực tiếp</h2>
+              <p class="muted small">
+                Số liệu thật từ máy này. Ô không xanh → gửi lại gói chẩn đoán.
+              </p>
+            </div>
+            <button class="link-btn" onclick={() => (showDebugPanel = false)}>
+              Đóng
+            </button>
           </header>
-          <pre class="debug-pre selectable">{debugText}</pre>
-          <p class="muted small">
-            Đèn: {lights.map((lit) => (lit ? '1' : '0')).join(' ')} · xanh
-            {greenStreak}/{AUTO_CAPTURE_STREAK} · tự chụp:
-            {settings.autoCapture ? 'bật' : 'tắt'}
-          </p>
-          {#if probeSquares.length > 0}
-            <p class="muted small">
-              Ô: {probeSquares
-                .map((square) => `${square.fill.toFixed(2)}/${square.side.toFixed(0)}`)
-                .join(' ')}
-            </p>
+
+          <div class="diag-status">
+            <span
+              class="tag"
+              class:tag-ok={probeStatus === 'alive'}
+              class:tag-bad={probeStatus === 'error'}
+            >
+              Worker:
+              {probeStatus === 'alive'
+                ? 'đang trả kết quả'
+                : probeStatus === 'error'
+                  ? 'LỖI'
+                  : 'chưa chạy'}
+            </span>
+            <span>{liveTicksPerSec.toFixed(1)} nhịp/s</span>
+            <span>{probeMs.toFixed(0)} ms</span>
+            <span>p75×{thresholdFactor()}</span>
+          </div>
+          {#if probeError}
+            <p class="diag-error selectable">{probeError}</p>
           {/if}
+          {#if cameraError}
+            <p class="diag-error selectable">{cameraError}</p>
+          {/if}
+
+          {#if frameInfo}
+            <pre class="debug-pre selectable">video {frameInfo.videoWidth}×{frameInfo.videoHeight} · readyState {frameInfo.readyState} · t={frameInfo.currentTime.toFixed(2)}s
+màn hình {frameInfo.displayWidth}×{frameInfo.displayHeight} @{frameInfo.dpr}x · {frameInfo.orientation}
+track: {trackText}
+settings: {JSON.stringify(trackSettings() ?? {})}</pre>
+          {:else}
+            <p class="muted small">Chưa có khung hình camera.</p>
+          {/if}
+
+          <label class="switch-row">
+            <span>
+              <b>Chế độ iOS dễ tính (mốc tương phản thấp)</b>
+              <small class="muted">
+                Ngưỡng p75×0.8 thay vì ×0.5 của APK — chỉ để so sánh, mặc định tắt.
+              </small>
+            </span>
+            <input
+              type="checkbox"
+              checked={tolerantMode}
+              onchange={toggleTolerant}
+            />
+          </label>
+
+          {#each liveDetails as detail, index}
+            <section class="roi-card">
+              <header class="roi-head">
+                <b>Ô {index + 1}</b>
+                <span class="tag" class:tag-ok={detail.ok} class:tag-bad={!detail.ok}>
+                  {detail.ok ? 'FOUND' : detail.reason}
+                </span>
+              </header>
+              {#if detail.diagnostics}
+                <p class="diag-line">
+                  ô ghim {detail.guidePx.left.toFixed(0)},{detail.guidePx.top.toFixed(0)} →
+                  {detail.guidePx.right.toFixed(0)},{detail.guidePx.bottom.toFixed(0)} px ·
+                  quét {detail.scanPx.left.toFixed(0)},{detail.scanPx.top.toFixed(0)} →
+                  {detail.scanPx.right.toFixed(0)},{detail.scanPx.bottom.toFixed(0)} px
+                </p>
+                <p class="diag-line">
+                  ngưỡng {detail.diagnostics.threshold.toFixed(1)} = p75
+                  {detail.diagnostics.pageLevel.toFixed(1)} ×
+                  {detail.diagnostics.thresholdFactor} · tối
+                  {detail.diagnostics.darkPixels}/{detail.diagnostics.sampledPixels} px ·
+                  {detail.diagnostics.componentCount} khối
+                </p>
+                {#if detail.diagnostics.closest}
+                  {@const closest = detail.diagnostics.closest}
+                  <p class="diag-line">
+                    gần tâm: cạnh {closest.side.toFixed(0)} px · đặc
+                    {closest.fill.toFixed(2)} · tỉ lệ {closest.aspect.toFixed(2)} ·
+                    cách {closest.distance.toFixed(1)} px
+                    {#if closest.touchesRegionEdge} · CHẠM MÉP{/if} ·
+                    {closest.accepted ? 'nhận' : (closest.reason ?? 'loại')}
+                  </p>
+                {/if}
+                {#if detail.diagnostics.mask}
+                  <canvas bind:this={rectCanvases[index]} class="roi-mask"></canvas>
+                {/if}
+              {:else}
+                <p class="diag-line">Không có số liệu chi tiết.</p>
+              {/if}
+            </section>
+          {/each}
+
+          {#if liveTicks.length > 0}
+            <h4 class="diag-title">Nhịp gần nhất</h4>
+            <pre class="debug-pre selectable">{liveTicks
+                .slice(0, 20)
+                .map(
+                  (tick) =>
+                    `${tick.at.slice(11, 23)} ${tick.frame} rs${tick.readyState} t${tick.currentTime} ${tick.lights} ${tick.reasons.join(' | ')}`
+                )
+                .join('\n')}</pre>
+          {/if}
+
+          <div class="diag-actions">
+            <button
+              class="btn primary"
+              onclick={exportLiveDiagnostics}
+              disabled={diagExporting}
+            >
+              {diagExporting ? 'Đang tạo…' : 'Lưu dữ liệu chẩn đoán'}
+            </button>
+            {#if captureDiagnostics}
+              <button
+                class="btn"
+                onclick={exportCaptureDiagnostics}
+                disabled={diagExporting}
+              >
+                Xuất lần chụp gần nhất ({captureDiagnostics.context.trigger === 'auto'
+                  ? 'tự động'
+                  : 'thủ công'})
+              </button>
+            {/if}
+          </div>
           <p class="muted small">
-            Mở trang với <b>?debug=1</b> để có eruda. Ảnh trung gian hiện ở màn
-            kết quả.
+            Gói gồm PNG khung gốc, 4 ảnh ROI ngưỡng và JSON (khung hình, mapping,
+            ngưỡng, lý do loại, lịch sử nhịp). Trên iPhone bấm Chia sẻ để gửi
+            lại.
           </p>
         </dialog>
       </div>
@@ -2142,6 +2890,108 @@
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.6px;
+  }
+
+  .tag.tag-ok {
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+    background: color-mix(in srgb, var(--ok) 12%, var(--surface));
+  }
+
+  .tag.tag-bad {
+    color: var(--bad);
+    border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+    background: color-mix(in srgb, var(--bad) 12%, var(--surface));
+  }
+
+  .diag-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+  }
+
+  .diag-error {
+    margin: 0;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+    background: color-mix(in srgb, var(--bad) 10%, var(--surface));
+    color: var(--bad);
+    font-size: 12px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .roi-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface-alt);
+  }
+
+  .roi-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 13px;
+  }
+
+  .diag-line {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    word-break: break-word;
+  }
+
+  .roi-mask {
+    width: 100%;
+    max-width: 180px;
+    height: auto;
+    image-rendering: pixelated;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #000;
+  }
+
+  .diag-title {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+
+  .diag-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .diag-toggle {
+    margin-top: 10px;
+  }
+
+  .align-warn {
+    margin: 0 0 10px;
+    padding: 9px 11px;
+    border-radius: 12px;
+    border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+    background: color-mix(in srgb, var(--warn) 12%, var(--surface));
+    color: var(--warn);
+    font-size: 12.5px;
+    line-height: 1.4;
+    font-weight: 600;
   }
 
   .result-actions {

@@ -28,6 +28,13 @@ export interface GradeParams {
   students: Student[];
   overlayRects: RectDto[] | null;
   frameSize: FrameSizeDto | null;
+  diagnostics?: boolean;
+  thresholdFactor?: number;
+}
+
+export interface ProbeOptions {
+  diagnostics?: boolean;
+  thresholdFactor?: number;
 }
 
 type Pending = {
@@ -47,14 +54,20 @@ export class OmrWorkerClient {
   private sequence = 0;
   private pending = new Map<number, Pending>();
 
-  probe(image: ImageLike, rects: RectDto[]): Promise<ProbeResponse> {
+  probe(
+    image: ImageLike,
+    rects: RectDto[],
+    options: ProbeOptions = {}
+  ): Promise<ProbeResponse> {
     const worker = this.ensureWorker();
     const id = ++this.sequence;
     const message: ProbeRequest = {
       type: 'probe',
       id,
       image: toImageBuffer(image),
-      rects
+      rects,
+      diagnostics: options.diagnostics === true,
+      thresholdFactor: options.thresholdFactor
     };
     return this.send(worker, message, [message.image.data]) as Promise<ProbeResponse>;
   }
@@ -70,7 +83,9 @@ export class OmrWorkerClient {
       keys: params.keys,
       students: params.students,
       overlayRects: params.overlayRects,
-      frameSize: params.frameSize
+      frameSize: params.frameSize,
+      diagnostics: params.diagnostics === true,
+      thresholdFactor: params.thresholdFactor
     };
     const response = (await this.send(worker, message, [
       message.image.data
@@ -136,6 +151,12 @@ export class OmrWorkerClient {
 
 function toImageBuffer(image: ImageLike): ImageBufferDto {
   const { data } = image;
+  const expected = image.width * image.height * 4;
+  if (data.length !== expected) {
+    throw new Error(
+      `Khung ảnh hỏng: ${image.width}×${image.height} cần ${expected} byte RGBA nhưng có ${data.length}.`
+    );
+  }
   let buffer: ArrayBuffer;
   if (
     data.byteOffset === 0 &&

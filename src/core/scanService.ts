@@ -20,6 +20,7 @@ import { SheetLayout } from './sheetLayout';
 import {
   PerspectiveWarper,
   SheetMarkerDetector,
+  solveHomography,
   type WarpedGray
 } from './sheetAlignment';
 import type { SheetSpec } from './types';
@@ -73,6 +74,29 @@ export interface PhotoScan {
   detectedCandidates?: Offset[] | null;
   verification?: WarpedMarkerCheck | null;
   timing?: PhotoScanTiming;
+  diagnostics?: PhotoScanDiagnostics | null;
+}
+
+export type QuadSource = 'known' | 'overlayRects' | 'detector' | 'overlayQuad';
+
+export interface PhotoScanDiagnostics {
+  quadSource: QuadSource;
+  pinnedQuad: AlignmentQuad | null;
+  detectorQuad: AlignmentQuad | null;
+  targetQuad: AlignmentQuad;
+  /** Kiểm chứng tính cho chẩn đoán — kể cả quad ghim (Dart bỏ qua). */
+  alignmentCheck: WarpedMarkerCheck | null;
+  alignmentWarning: boolean;
+  rescuedQuad: boolean;
+  homography: number[] | null;
+  pageScale: number;
+  srcWidth: number;
+  srcHeight: number;
+  srcDataLength: number;
+  warpedWidth: number;
+  warpedHeight: number;
+  verificationSkipped: boolean;
+  thresholdFactor: number;
 }
 
 export const MARKER_VERIFICATION_TOLERANCE_PX = 6;
@@ -130,6 +154,10 @@ export interface ScanPhotoOptions {
   skipVerification?: boolean;
   overlayMinQuality?: number;
   requireVerifiedWarp?: boolean;
+  /** Tính quad ghim/detector, verify và homography cho chẩn đoán. */
+  diagnoseAlignment?: boolean;
+  /** Hệ số ngưỡng quét blob trong ô ghim (Dart 0.5; dễ tính 0.8). */
+  thresholdFactor?: number;
 }
 
 export class OmrScanService {
@@ -152,6 +180,13 @@ export class OmrScanService {
     const srcH = image.height;
     const srcBytes = image.data;
     const srcCh = 4;
+    const expectedBytes = srcW * srcH * srcCh;
+    if (srcBytes.length !== expectedBytes) {
+      throw new Error(
+        `Kích thước pixel không khớp: ${srcBytes.length} byte, cần ${srcW}×${srcH}×4 = ${expectedBytes}.`
+      );
+    }
+    const thresholdFactor = options.thresholdFactor ?? 0.5;
 
     let grayMs = 0;
     let grayCache: Uint8ClampedArray | null = null;
@@ -186,22 +221,42 @@ export class OmrScanService {
     let quad: AlignmentQuad | null = null;
     let detectedCandidates: Offset[] | null = null;
     let quadFromDetector = false;
+    let quadSource: QuadSource = 'detector';
+    let pinnedQuad: AlignmentQuad | null = null;
+    let detectorQuad: AlignmentQuad | null = null;
 
     if (options.knownQuad) {
       quad = options.knownQuad;
+      quadSource = 'known';
     } else if (options.overlayRects) {
-      quad = this.resolveOverlayRects(srcBytes, srcCh, srcW, srcH, options.overlayRects, options.frameSize ?? new Size(1, 1));
-      if (!quad) {
+      pinnedQuad = this.resolveOverlayRects(
+        srcBytes,
+        srcCh,
+        srcW,
+        srcH,
+        options.overlayRects,
+        options.frameSize ?? new Size(1, 1),
+        null,
+        thresholdFactor
+      );
+      quad = pinnedQuad;
+      if (pinnedQuad) {
+        quadSource = 'overlayRects';
+      } else {
         const detection = this.detector.detectGray(srcGray(), srcW, srcH);
         detectedCandidates = detection.candidates;
+        detectorQuad = detection.quad;
         quad = detection.quad;
         quadFromDetector = quad !== null;
+        quadSource = 'detector';
       }
     } else {
       const detection = this.detector.detectGray(srcGray(), srcW, srcH);
       detectedCandidates = detection.candidates;
+      detectorQuad = detection.quad;
       quad = detection.quad;
       quadFromDetector = quad !== null;
+      quadSource = 'detector';
       if (!quad && options.overlayQuad) {
         quad = this.resolveOverlayQuad(
           image,
@@ -211,6 +266,7 @@ export class OmrScanService {
           targetQuad,
           options.overlayMinQuality ?? 0.55
         );
+        if (quad) quadSource = 'overlayQuad';
       }
     }
     overlayMs = performance.now() - swOverlay;
@@ -230,6 +286,69 @@ export class OmrScanService {
 
     let warped = warpPage(quad);
     let verification: WarpedMarkerCheck | null = null;
+    let alignmentCheck: WarpedMarkerCheck | null = null;
+    let alignmentWarning = false;
+    let rescuedQuad = false;
+    let verificationSkipped = false;
+
+    const verifyWarp = (w: WarpedGray): WarpedMarkerCheck =>
+      verifyWarpedGrayPlanar(
+        w.gray,
+        w.width,
+        w.height,
+        layout,
+        this.detector,
+        MARKER_VERIFICATION_TOLERANCE_PX * pageScale
+      );
+
+    const collectAlts = (current: AlignmentQuad): { quad: AlignmentQuad; source: QuadSource }[] => {
+      const alts: { quad: AlignmentQuad; source: QuadSource }[] = [];
+      if (!quadFromDetector && options.overlayRects) {
+        const det = this.detector.detectGray(srcGray(), srcW, srcH);
+        detectedCandidates = det.candidates;
+        if (det.quad) {
+          detectorQuad = det.quad;
+          alts.push({ quad: det.quad, source: 'detector' });
+        }
+        const altRects = this.resolveOverlayRects(
+          srcBytes,
+          srcCh,
+          srcW,
+          srcH,
+          options.overlayRects,
+          options.frameSize ?? new Size(1, 1),
+          current,
+          thresholdFactor
+        );
+        if (altRects) alts.push({ quad: altRects, source: 'overlayRects' });
+      } else if (quadFromDetector) {
+        if (options.overlayRects) {
+          const altRects = this.resolveOverlayRects(
+            srcBytes,
+            srcCh,
+            srcW,
+            srcH,
+            options.overlayRects,
+            options.frameSize ?? new Size(1, 1),
+            current,
+            thresholdFactor
+          );
+          if (altRects) alts.push({ quad: altRects, source: 'overlayRects' });
+        }
+        if (options.overlayQuad) {
+          const altQuad = this.resolveOverlayQuad(
+            image,
+            options.overlayQuad,
+            options.frameSize ?? new Size(1, 1),
+            layout,
+            targetQuad,
+            options.overlayMinQuality ?? 0.55
+          );
+          if (altQuad) alts.push({ quad: altQuad, source: 'overlayQuad' });
+        }
+      }
+      return alts;
+    };
 
     if (options.knownQuad) {
       verification = null;
@@ -237,71 +356,19 @@ export class OmrScanService {
       const quadTrusted = !quadFromDetector && options.overlayRects != null;
       if ((options.skipVerification ?? false) || quadTrusted) {
         verification = null;
+        verificationSkipped = true;
       } else {
-        verification = verifyWarpedGrayPlanar(
-          warped.gray,
-          warped.width,
-          warped.height,
-          layout,
-          this.detector,
-          MARKER_VERIFICATION_TOLERANCE_PX * pageScale
-        );
+        verification = verifyWarp(warped);
         if (!verification.passed) {
-          const alts: AlignmentQuad[] = [];
-          if (!quadFromDetector && options.overlayRects) {
-            const det = this.detector.detectGray(srcGray(), srcW, srcH);
-            detectedCandidates = det.candidates;
-            if (det.quad) alts.push(det.quad);
-            const altRects = this.resolveOverlayRects(
-              srcBytes,
-              srcCh,
-              srcW,
-              srcH,
-              options.overlayRects,
-              options.frameSize ?? new Size(1, 1),
-              quad
-            );
-            if (altRects) alts.push(altRects);
-          } else if (quadFromDetector) {
-            if (options.overlayRects) {
-              const altRects = this.resolveOverlayRects(
-                srcBytes,
-                srcCh,
-                srcW,
-                srcH,
-                options.overlayRects,
-                options.frameSize ?? new Size(1, 1),
-                quad
-              );
-              if (altRects) alts.push(altRects);
-            }
-            if (options.overlayQuad) {
-              const altQuad = this.resolveOverlayQuad(
-                image,
-                options.overlayQuad,
-                options.frameSize ?? new Size(1, 1),
-                layout,
-                targetQuad,
-                options.overlayMinQuality ?? 0.55
-              );
-              if (altQuad) alts.push(altQuad);
-            }
-          }
-          for (const alt of alts) {
-            if (quadEqual(alt, quad)) continue;
-            const altPage = warpPage(alt);
-            const altVerification = verifyWarpedGrayPlanar(
-              altPage.gray,
-              altPage.width,
-              altPage.height,
-              layout,
-              this.detector,
-              MARKER_VERIFICATION_TOLERANCE_PX * pageScale
-            );
+          for (const alt of collectAlts(quad)) {
+            if (quadEqual(alt.quad, quad)) continue;
+            const altPage = warpPage(alt.quad);
+            const altVerification = verifyWarp(altPage);
             if (altVerification.passed) {
-              quad = alt;
+              quad = alt.quad;
               warped = altPage;
               verification = altVerification;
+              quadSource = alt.source;
               break;
             }
           }
@@ -310,6 +377,30 @@ export class OmrScanService {
           return null;
         }
       }
+    }
+
+    // Chẩn đoán căn chỉnh: luôn kiểm chứng round-trip (kể cả quad GHIM — Dart
+    // R17 bỏ qua bước này). Không đổi kết quả chấm; nếu quad ghim rớt, thử
+    // detector + biến thể hướng còn lại và chỉ nhận quad đạt kiểm chứng.
+    if (options.diagnoseAlignment) {
+      alignmentCheck = verification ?? verifyWarp(warped);
+      if (!options.knownQuad && verificationSkipped && alignmentCheck && !alignmentCheck.passed) {
+        for (const alt of collectAlts(quad)) {
+          if (quadEqual(alt.quad, quad)) continue;
+          const altPage = warpPage(alt.quad);
+          const altCheck = verifyWarp(altPage);
+          if (altCheck.passed) {
+            quad = alt.quad;
+            warped = altPage;
+            verification = altCheck;
+            alignmentCheck = altCheck;
+            quadSource = alt.source;
+            rescuedQuad = true;
+            break;
+          }
+        }
+      }
+      alignmentWarning = alignmentCheck != null && !alignmentCheck.passed;
     }
 
     const warpMs = performance.now() - swWarp;
@@ -324,6 +415,35 @@ export class OmrScanService {
     );
     const scanMs = performance.now() - swScan;
 
+    let homography: number[] | null = null;
+    if (options.diagnoseAlignment) {
+      try {
+        homography = [...solveHomography(targetQuad.corners, quad.corners)];
+      } catch {
+        homography = null;
+      }
+    }
+    const diagnostics: PhotoScanDiagnostics | null = options.diagnoseAlignment
+      ? {
+          quadSource,
+          pinnedQuad,
+          detectorQuad,
+          targetQuad,
+          alignmentCheck,
+          alignmentWarning,
+          rescuedQuad,
+          homography,
+          pageScale,
+          srcWidth: srcW,
+          srcHeight: srcH,
+          srcDataLength: srcBytes.length,
+          warpedWidth: warped.width,
+          warpedHeight: warped.height,
+          verificationSkipped,
+          thresholdFactor
+        }
+      : null;
+
     return {
       scan,
       quad,
@@ -332,6 +452,7 @@ export class OmrScanService {
       warpedHeight: warped.height,
       detectedCandidates,
       verification,
+      diagnostics,
       timing: {
         grayMs,
         overlayMs,
@@ -424,7 +545,8 @@ export class OmrScanService {
     imageHeight: number,
     overlayRects: Rect[],
     frameSize: Size,
-    exclude: AlignmentQuad | null = null
+    exclude: AlignmentQuad | null = null,
+    thresholdFactor = 0.5
   ): AlignmentQuad | null {
     if (overlayRects.length < 4) return null;
     const size = new Size(imageWidth, imageHeight);
@@ -469,7 +591,14 @@ export class OmrScanService {
           Math.max(c0.dx, c1.dx) * size.width,
           Math.max(c0.dy, c1.dy) * size.height
         );
-        const locate = locateDarkBlobInRect(bytes, channels, imageWidth, imageHeight, region);
+        const locate = locateDarkBlobInRect(
+          bytes,
+          channels,
+          imageWidth,
+          imageHeight,
+          region,
+          thresholdFactor
+        );
         if (!locate) {
           ok = false;
           break;
@@ -581,7 +710,8 @@ function locateDarkBlobInRect(
   channels: number,
   imageWidth: number,
   imageHeight: number,
-  region: Rect
+  region: Rect,
+  thresholdFactor = 0.5
 ) {
   const w = imageWidth;
   const h = imageHeight;
@@ -597,7 +727,8 @@ function locateDarkBlobInRect(
     width: w,
     height: h,
     region,
-    grayAt
+    grayAt,
+    thresholdFactor
   });
 }
 
